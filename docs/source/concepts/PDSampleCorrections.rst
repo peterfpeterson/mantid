@@ -68,7 +68,17 @@ b_{tot}^2`.
 
    \Phi = \frac{ I^E_n - I^E_B } {[A_{n,n} N_n [ \langle b_v^2 \rangle + P_n^{ie} ] + M_{n}]  }
 
-As you can see, this relies heavily on the algorithms described in :ref:`Sample Corrections`.
+As you can see, this relies heavily on the algorithms described in
+:ref:`Sample Corrections`. The correction currently applied in
+:ref:`SNSPowderReduction <algm-SNSPowderReduction>` is using
+:ref:`CalculateCarpenterSampleCorrection
+<algm-CalculateCarpenterSampleCorrection>` where :math:`M_n =
+M_{carpenter} (I^E_n - I^E_B)`.
+
+.. math::
+
+   \Phi = (1/A_{n,n} - M_{carpenter}) (I^E_n - I^E_B)
+
 
 Various simplifications
 -----------------------
@@ -77,13 +87,6 @@ Dropping the sample environment term, and making the conversion of
 :math:`\frac{A_{c,sc}}{A_{c,c}A_{s,sc}} = \frac{1}{A_{c,c}}` and
 :math:`\frac{1}{A_{s,sc}} = \frac{1}{A_{s,s}}` for when partial
 absorption calculations weren't made, Eq. :eq:`the_big_one` becomes
-
-.. math::
-
-   \frac{d\sigma}{d\Omega} =   \frac{1}{A_{s,s} N_s}   \bigg [ \frac{1}{\Phi} (I^E_s - I^E_B) - M_{sc}
-                               - \frac{A_{s,s}}{A_{c,c}} \Big [\frac{1}{\Phi} (I^E_c - I^E_B) - M_{c} \Big ] \bigg ]  - P_s^{ie}
-
-with the furnace correction
 
 .. math::
 
@@ -136,7 +139,7 @@ process of being upgraded to the equation (lots of detail missing and
 .. math::
 
    I(Q) = \bigg [ \frac{1}{A_{s,s}} (I^E_s - I^E_B) - \frac{1}{A_{c,c}} (I^E_c - I^E_B) \bigg ]
-          / \bigg [ \frac{1}{A_{v,v}} (I^E_v - I^E_B) \bigg ]
+          / \bigg [ (\frac{1}{A_{n,n}} - M_{carpenter}) (I^E_n - I^E_B) \bigg ]
 
 Using this fancy equation in practice
 -------------------------------------
@@ -181,17 +184,17 @@ enumerate how one can implement Eq. :eq:`the_big_one`.
 9. Apply the final absorption workspace and divide by number of atoms in the beam.
 10. Calculate the inelastic scattering, the Plazcek correction will do
     **There isn't an algorithm yet**
-10. Subtract the inelastic scattering
-11. Divide the DCS by :math:`\langle b_{coh} \rangle^2` and subtract off the
+11. Subtract the inelastic scattering
+12. Divide the DCS by :math:`\langle b_{coh} \rangle^2` and subtract off the
     normalized Laue term.
-12. :ref:`MatchSpectra <algm-MatchSpectra>` the super-pixels. This
+13. :ref:`MatchSpectra <algm-MatchSpectra>` the super-pixels. This
     would probably be easier to use with :math:`S(Q)-1` **shouldn't be
     necessary**
-13. :ref:`SumSpectra <algm-SumSpectra>` with ``WeightedSum=True,
+14. :ref:`SumSpectra <algm-SumSpectra>` with ``WeightedSum=True,
     MultiplyBySpectra=False`` to get a single output workspace that is
     :math:`S(Q)` **missing a good way to create 6 spectra for Rietveld
     from the super-pixels**
-14. Profit!!!!!!!!!!
+15. Profit!!!!!!!!!!
 
 Processing the vanadium would/does go through a similar process, with
 the additions of :ref:`removing the Bragg peaks
@@ -209,3 +212,44 @@ reductions. Currently it is just the result of
 :ref:`AlignAndFocusPowderFromFiles
 <algm-AlignAndFocusPowderFromFiles>`, but the fully processed
 normalization, :math:`\Phi` would greatly improve performance.
+
+
+The comparisons
+===============
+
+The runs being compared are all from POWGEN and all measure in
+high-resolution mode. For samples background is the empty can. For
+vanadium it is the empty instrument.
+
++-----------+----------+------------+
+| Run id    | Material | Container  |
++===========+==========+============+
+| PG3_40279 | LaB6     | PAC06      |
++-----------+----------+------------+
+| PG3_40283 | Si       | PAC06      |
++-----------+----------+------------+
+| PG3_40290 | NAC      | PAC06      |
++-----------+----------+------------+
+| PG3_40524 | Al2O3    | PAC06      |
++-----------+----------+------------+
+| PG3_40526 | Ni       | PAC08      |
++-----------+----------+------------+
+| PG3_40521 | V        | N/A        |
++-----------+----------+------------+
+
+empty instrument / vanadium background was PG3_40519
+
+NAC = Na2Ca3Al2F14
+
+Containers
+
++-------+-----------+
+| label | run id    |
++=======+===========+
+| PAC06 | PG3_40515 |
++-------+-----------+
+| PAC08 | PG3_40517 |
++-------+-----------+
+
+
+First is running the current :ref:`SNSPowderReduction <algm-SNSPowderReduction>`
