@@ -34,6 +34,17 @@ Improvements
    :width: 500px
    :align: right
 
+Improvements
+############
+- :ref:`WANDPowderReduction <algm-WANDPowderReduction>` now accepts a sequence of input workspaces, combining them to reduce to a single spectrum.
+- The plot pane in the Engineering Diffraction interface can now be undocked from the main window, making this more readable when the fit property view is open.
+- The height of the :ref:`func-BackToBackExponential` peak is now preserved when changing the FWHM sliders when fitting.
+- :ref:`PowderILLDetectorScan <algm-PowderILLDetectorScan>` is corrected when treating multiple scans merged.
+- The default loadpath in the fitting tab of the Engineering Diffraction UI is now set to the most recently focused files.
+- The :ref:`HB2AReduce <algm-HB2AReduce>` now can save reduced data to GSAS or XYE file.
+- :ref:`PDCalibration <algm-PDCalibration>` now intitialises A,B and S of BackToBackExponential if correpsonding coeficients are in the instrument parameter.xml file.
+- :ref:`PDCalibration <algm-PDCalibration>` now supports workspaces with grouped detectors (i.e. more than one detector per spectrum)
+
 - **Nexus files from ILL's instrument D1B can now be loaded (see InstrumentViewer)**
 - Powder diffraction support (instruments D2B and D20) has been added to DrILL interface. See :ref:`DrILL documentation <DrILL-ref>` for more information.
 
@@ -67,6 +78,7 @@ Bugfixes
 - Dummy detectors in POLARIS workspaces no longer prevent unit conversion
 - Focus in PEARL powder diffraction scripts no longer fails if previous run has created a Van splines WorkspaceGroup
 - :ref:`WANDPowderReduction <algm-WANDPowderReduction>` once again accepts multiple input workspaces and outputs a WorkspaceGroup when specified by user
+- Fix out-of-range bug in :ref:`FitPeaks <algm-FitPeaks>` for histogram data.
 
 
 Engineering Diffraction
