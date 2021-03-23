@@ -1,13 +1,15 @@
 from collections import namedtuple
 import h5py
-from mantid.simpleapi import (LoadEventAndCompress, CloneWorkspace, CompressEvents, ConvertDiffCal, ConvertUnits, CreateGroupingWorkspace,
-                              CropWorkspace, CrossCorrelate, DeleteWorkspace, GeneratePythonScript, GetDetectorOffsets,
-                              LoadInstrument, mtd, Plus, Rebin, SaveDiffCal, SaveNexusProcessed)
+from mantid.simpleapi import (AlignDetectors, CloneWorkspace, CompressEvents, ConvertDiffCal, ConvertUnits, ConvertToMatrixWorkspace,
+                              CreateGroupingWorkspace, CropWorkspace, CrossCorrelate, DeleteWorkspace, DiffractionFocussing,
+                              FitPeaks, GeneratePythonScript, GetDetectorOffsets, LoadDiffCal, LoadEventAndCompress, LoadInstrument,
+                              MaskDetectors, mtd, Plus, Rebin, SaveDiffCal, SaveNexusProcessed)
 import numpy as np
 import os
-from typing import Any, Dict, Tuple, Union
+from typing import Any, Dict, List, Tuple, Union
 
-
+CAL_TABLE_DIFC_COLUMN = 1   # TODO should be done through introspection
+CAL_TABLE_TZERO_COLUMN = 3   # TODO should be done through introspection
 CROSS_CORRELATE_PEAK_FIT_NUMBER = 1
 """
 Total = 81920 * 2 + (24900 - 6468) * 2 = 200704
@@ -21,7 +23,14 @@ VULCAN_X_PIXEL_RANGE = {'Bank1': (0, 81920),  # 160 tubes
                         }
 VULCAN_X_PIXEL_NUMBER = 200704
 
+# This is VULCAN variables
+STARTING_PROFILE_PARAMETERS = {'A': [1030., 752., 2535],
+                               'B': [1030., 752., 1282],
+                               'S': [0.002, 0.002, 0.00057],
+                               'W': [5, 5, 1]}
 
+
+############################################ cross correlation code
 class CrossCorrelateParameter(namedtuple('CrossCorrelateParameter',
                                          'name reference_peak_position reference_peak_width reference_ws_index '
                                          'cross_correlate_number bin_step start_ws_index end_ws_index')):
@@ -37,7 +46,8 @@ class CrossCorrelateParameter(namedtuple('CrossCorrelateParameter',
 
 def load_and_crop(runnumbers, bin_step: float = -.001, tof_min: float = 500, tof_max: float = 16666.7,
                   d_min: float = 0.3, d_max: float = 2.1,
-                  bad_pulse_threashold: float = 10, reload_instrument: bool = False, convert_to_dspace=False):
+                  bad_pulse_threashold: float = 10, convert_to_dspace=False,
+                  user_idf: str = ''):
     # put instrument name into filenames
     filenames = [f'VULCAN_{runnum}' for runnum in runnumbers]
     # workspace to accumulate to is just first runnumber
@@ -60,8 +70,8 @@ def load_and_crop(runnumbers, bin_step: float = -.001, tof_min: float = 500, tof
     CropWorkspace(InputWorkspace=dia_wksp, OutputWorkspace=dia_wksp, XMin=tof_min, XMax=tof_max)
 
     # optionally Reload instrument from the version on disk
-    if reload_instrument:
-        LoadInstrument(Workspace=dia_wksp, InstrumentName='VULCAN', RewriteSpectraMap=False)
+    if user_idf:
+        LoadInstrument(Workspace=dia_wksp, InstrumentName=user_idf, RewriteSpectraMap=False)
 
     if convert_to_dspace:
         ConvertUnits(InputWorkspace=dia_wksp, OutputWorkspace=dia_wksp, Target='dSpacing')
@@ -1000,16 +1010,596 @@ def cross_correlation_in_tubes():
     return cross_correlate_param_dict
 
 
+############################################ pdcalibration-style
+def make_group_workspace(template_ws_name: str,
+                         group_ws_name: str,
+                         grouping_plan: List[Tuple[int, int, int]]):
+    """Create a GroupWorkspace with user specified group strategy
+    Returns
+    -------
+    mantid.dataobjects.GroupingWorkspace
+        Instance of the GroupingWorkspace generated
+    """
+    # Create an empty GroupWorkspace
+    group_ws = CreateGroupingWorkspace(InputWorkspace=template_ws_name,
+                                       GroupDetectorsBy='Group',
+                                       OutputWorkspace=group_ws_name)
+    group_ws = group_ws.OutputWorkspace
+
+    # Set customized group to each pixel
+    group_index = 1
+    for start_index, step_size, end_index in grouping_plan:
+        for ws_index in range(start_index, end_index, step_size):
+            # set values
+            for ws_shift in range(step_size):
+                group_ws.dataY(ws_index + ws_shift)[0] = group_index
+            # promote group index
+            group_index += 1
+
+    return group_ws
+
+
+def align_focus_event_ws(event_ws_name,
+                         calib_ws_name: Union[str, None],
+                         group_ws_name: str,
+                         mask_ws_name: Union[str, None],
+                         customized_grouping_ws_name: Union[str, None],
+                         output_dir: str,
+                         save_workspace: bool = False) -> Tuple[str, str]:
+    """
+    overwrite the input
+    """
+    # determine tag
+    file_tag = ''
+
+    # Align detector or not
+    unit = mtd[event_ws_name].getAxis(0).getUnit().unitID()
+    if unit != 'TOF':
+        ConvertUnits(InputWorkspace=event_ws_name, OutputWorkspace=event_ws_name, Target='TOF')
+
+    if calib_ws_name:
+        # align detectors and convert unit to dSpacing
+        AlignDetectors(InputWorkspace=event_ws_name, OutputWorkspace=event_ws_name,
+                       CalibrationWorkspace=calib_ws_name)
+        file_tag += '_Cal'
+
+    else:
+        # optionally not align detectors: convert to dSpacing
+        ConvertUnits(InputWorkspace=event_ws_name, OutputWorkspace=event_ws_name, Target='dSpacing')
+        file_tag += '_Raw'
+
+    # Rebin
+    Rebin(InputWorkspace=event_ws_name, OutputWorkspace=event_ws_name, Params='0.3,-0.0003,1.5')
+
+    if save_workspace:
+        # Save aligned but not focused workspace
+        # Convert to matrix workspace
+        matrix_ws_name = f'{event_ws_name}_matrix'
+        ConvertToMatrixWorkspace(InputWorkspace=event_ws_name, OutputWorkspace=matrix_ws_name)
+
+        # Save nexus for 2D alignment view
+        SaveNexusProcessed(InputWorkspace=matrix_ws_name,
+                           Filename=os.path.join(output_dir, f'{event_ws_name}{file_tag}.nxs'))
+        # remove matrix workspace after being saved
+        mtd.remove(matrix_ws_name)
+
+    # Mask group workspace
+    if mask_ws_name:
+        MaskDetectors(Workspace=group_ws_name, MaskedWorkspace=mask_ws_name)
+        file_tag += 'Masked'
+    else:
+        file_tag += '_Nomask'
+
+    # Diffraction focus to standard group
+    if customized_grouping_ws_name is not None:
+        if save_workspace:
+            # User requires to focus to customized groups:
+            # Do focus to the regular 3 banks and save
+            # Focus to matrix workspace and save
+            matrix_ws_name = f'{event_ws_name}_matrix'
+            DiffractionFocussing(InputWorkspace=event_ws_name, OutputWorkspace=matrix_ws_name,
+                                 GroupingWorkspace=group_ws_name, PreserveEvents=False)
+            focused_run_nxs = os.path.join(output_dir, f'{event_ws_name}{file_tag}_3banks.nxs')
+
+            SaveNexusProcessed(InputWorkspace=matrix_ws_name, Filename=focused_run_nxs)
+            # clean memory
+            mtd.remove(matrix_ws_name)
+
+        # Diffraction focus: original EventWorkspace is then aligned and focused for next step
+        DiffractionFocussing(InputWorkspace=event_ws_name, OutputWorkspace=event_ws_name,
+                             GroupingWorkspace=customized_grouping_ws_name, PreserveEvents=True)
+
+    else:
+        # focus with standard group and keep events
+        DiffractionFocussing(InputWorkspace=event_ws_name, OutputWorkspace=event_ws_name,
+                             GroupingWorkspace=group_ws_name, PreserveEvents=True)
+
+    # Convert from event workspace to workspace 2D
+    if save_workspace:
+        matrix_ws_name = f'{event_ws_name}_matrix'
+        ConvertToMatrixWorkspace(InputWorkspace=event_ws_name, OutputWorkspace=matrix_ws_name)
+        num_hist = mtd[event_ws_name].getNumberHistograms()
+        focused_run_nxs = os.path.join(output_dir, f'{event_ws_name}{file_tag}_{num_hist}banks.nxs')
+        SaveNexusProcessed(InputWorkspace=matrix_ws_name, Filename=focused_run_nxs)
+        mtd.remove(matrix_ws_name)
+    else:
+        focused_run_nxs = None
+
+    # Edit instrument geometry
+    # NOTE: Disable EditInstrumentGeometry as
+    #   1.  The geometry information won't be saved to processed NeXus
+    #   2.  It destroys the geometry information that can be used for FitPeaks with instrument parameters
+    # EditInstrumentGeometry(Workspace=event_ws_name, PrimaryFlightPath=42, SpectrumIDs='1-3', L2='2,2,2',
+    #                        Polar='89.9284,90.0716,150.059', Azimuthal='0,0,0', DetectorIDs='1-3',
+    #                        InstrumentName='vulcan_3bank')
+
+    return event_ws_name, focused_run_nxs
+
+
+def load_calibration_file(calib_file_name: str,
+                          output_name: str,
+                          ref_ws_name: Union[None, str]):
+    """Load calibration diffraction file
+    Outputs are 'OutputCalWorkspace', 'OutputGroupingWorkspace', 'OutputMaskWorkspace'
+    Note:
+    - output_name:  this is NOT calibration workspace name but a base name for multiple calibration-related
+    workspaces
+    Parameters
+    ----------
+    calib_file_name
+    output_name: str
+        base name for calib, mask and group
+    ref_ws_name: str, None
+        reference VULCAN file
+    Returns
+    -------
+    ~tuple
+        1) output workspaces (2) output offsets workspace (as LoadDiffCal_returns cannot have an arbitrary member)
+    """
+    # check
+    assert os.path.exists(calib_file_name), f'Calibration file {calib_file_name} cannot be found.'
+
+    # determine file names
+    if calib_file_name.endswith('.h5'):
+        diff_cal_file = calib_file_name
+    else:
+        raise RuntimeError('Calibration file {} does not end with .h5 or .dat.  Unable to support'
+                           ''.format(calib_file_name))
+
+    # Load files: new diff calib file
+    print(f'About to loading {diff_cal_file} to {output_name} with reference to {ref_ws_name}')
+    outputs = LoadDiffCal(InputWorkspace=ref_ws_name,
+                          Filename=diff_cal_file,
+                          WorkspaceName=output_name)
+
+    return outputs
+
+
+def reduce_calibration(event_ws_name: str,
+                       calibration_file: str,
+                       user_idf: str = '',
+                       apply_mask=True,
+                       align_detectors=True,
+                       customized_group_ws_name: Union[str, None] = None,
+                       output_dir: str = os.getcwd()) -> Tuple[str, str]:
+    """Reduce data to test calibration
+    If a customized group workspace is specified, the native 3-bank will be still focused and saved.
+    But the return value will be focused on the customized groups
+    Parameters
+    ----------
+    event_ws_name: str
+        Name of EventWorkspace to reduce from
+    calibration_file
+    user_idf: str, None
+        If give, use IDF to reload instrument and automatically disable align detector
+    apply_mask
+    align_detectors: bool
+        Flag to align detector or not
+    customized_group_ws_name: str, None
+        Name of customized GroupWorkspace (other than standard 3 banks)
+    output_dir: str
+        Directory for output files
+    Returns
+    -------
+    ~tuple
+        focused workspace name, path to processed nexus file saved from focused workspace
+    """
+    # Load calibration file
+    calib_tuple = load_calibration_file(calibration_file, 'VulcanX_PD_Calib', event_ws_name)
+    calib_cal_ws = calib_tuple.OutputCalWorkspace
+    calib_group_ws = calib_tuple.OutputGroupingWorkspace
+    calib_mask_ws = calib_tuple.OutputMaskWorkspace
+
+    # Load instrument
+    if user_idf:
+        LoadInstrument(Workspace=event_ws_name,
+                       Filename=user_idf,
+                       InstrumentName='VULCAN',
+                       RewriteSpectraMap=True)
+        # auto disable align detector
+        align_detectors = False
+
+    # Align, focus and export
+    focused_tuple = align_focus_event_ws(event_ws_name,
+                                         str(calib_cal_ws) if align_detectors else None,
+                                         str(calib_group_ws),
+                                         str(calib_mask_ws) if apply_mask else None,
+                                         customized_group_ws_name,
+                                         output_dir=output_dir)
+
+    return focused_tuple
+
+
+def align_vulcan_data(diamond_runs: Union[str, List[Union[int, str]]],
+                      diff_cal_file_name: str,
+                      output_dir: str,
+                      tube_grouping_plan: List[Tuple[int, int, int]],
+                      user_idf: str = '') -> Tuple[str, str]:
+    """
+    Parameters
+    ----------
+    diamond_runs: ~list, str
+        list of diamond runs (nexus file path) or diamond EventWorkspace
+    diff_cal_file_name
+    output_dir: str
+        output directory
+    tube_grouping_plan: ~list
+        List of 3 tuples to indicate how to group
+    Returns
+    -------
+    """
+    if isinstance(diamond_runs, str):
+        # Check a valid workspace
+        assert mtd.doesExist(diamond_runs)
+        diamond_ws_name = diamond_runs
+    else:
+        # must be a list of nexus file names or runs
+        # diamond_runs, user_idf, output_dir
+        diamond_ws_name = load_and_crop(diamond_runs)
+
+    # TODO FIXME - shall this method be revealed to the client?
+    if tube_grouping_plan:
+        tube_group_ws_name = 'TubeGroup'
+        tube_group = make_group_workspace(diamond_ws_name, tube_group_ws_name, tube_grouping_plan)
+    else:
+        tube_group = None
+
+    focused_ws_name, focused_nexus = reduce_calibration(diamond_ws_name,
+                                                        calibration_file=diff_cal_file_name,
+                                                        user_idf=user_idf,
+                                                        apply_mask=True,
+                                                        align_detectors=True,
+                                                        customized_group_ws_name=tube_group,
+                                                        output_dir=output_dir)
+
+    return focused_ws_name, focused_nexus
+
+
+class Res(object):
+    """
+    Residual (data) structure
+    """
+    def __init__(self):
+        self.intercept = None
+        self.slope = None
+        # number of sample points to do linear regression
+        self.num_points = 0
+        # more information
+        self.vec_x = None
+        self.vec_y = None
+        self.vec_e = None
+
+    def __str__(self):
+        return f'd = {self.intercept} + {self.slope} x d\''
+
+    def calibrate_difc_t0(self, difc) -> Tuple[float, float]:
+
+        new_difc = difc / self.slope
+        tzero = - difc * self.intercept / self.slope
+
+        return tzero, new_difc
+
+
+def update_calibration_table(cal_table, residual, start_index, end_index):
+    """
+    Theory
+    TOF = DIFC^(1) * d': first round calibration
+    d = a + b * d': 2nd round calibration
+    TOF = DIFC * (d / b - a / b)
+        = -DIFC * a / b + DIFC / b * d
+    DIFC^(2)(i) = DIFC / b
+    T0^(2)(i) = - DIFC * a  / b
+    Parameters
+    ----------
+    cal_table
+    residual
+    start_index
+    end_index
+    Returns
+    -------
+    """
+    # slope:
+    b = residual.slope
+    # interception:
+    a = residual.intercept
+
+    print(f'[INFO] Calibrate spectrum {start_index} to {end_index} with formula: d = {b} * d\' + {a}')
+
+    for i_r in range(start_index, end_index):
+        # original difc
+        difc = cal_table.cell(i_r, 1)
+        tzero = cal_table.cell(i_r, 3)
+        if abs(tzero) > 1E-6:
+            raise RuntimeError(f'Calibration table row {i_r}, Found non-zero TZERO {tzero}')
+        # apply 2nd round correction
+        new_difc = difc / b
+        tzero = - difc * a / b
+        # set
+        cal_table.setCell(i_r, CAL_TABLE_DIFC_COLUMN, new_difc)
+        cal_table.setCell(i_r, CAL_TABLE_TZERO_COLUMN, tzero)
+
+
+def apply_peaks_positions_calibration(diff_cal_table_name: str,
+                                      residual_list: List[Tuple[Res, int, int]]):
+    """Apply DIFC and T0 shift to original diffraction calibration table
+    Apply d = a + b * d' to TOF = DIFC * d'
+    Parameters
+    ----------
+    diff_cal_table_name
+    residual_list: ~list
+        List of 3 tuple as residual, starting workspace index and ending workspace index (exclusive)
+    Returns
+    -------
+    """
+    for residual, start_index, end_index in residual_list:
+        # update calibration table
+        update_calibration_table(mtd[diff_cal_table_name], residual, start_index, end_index)
+
+
+def peak_width(d):
+    """Estimate peak width by FWHM(d)^2 = w0 + w1 * d^2 + w2 * d^4
+    Parameters
+    ----------
+    d: float
+        peak position in dSpacing
+    Returns
+    -------
+    tuple
+        peak width, square of peak width
+    """
+    # The following set is for Bank 5.  Thus for Bank 1 and Bank 2, a factor must be multiplied
+    w0 = -2.259378321115203e-07
+    w1 = 1.233167702630151e-06
+    w2 = 5.7816197222790225e-08
+    width_sq = w0 + w1 * d ** 2 + w2 * d ** 4
+    width = np.sqrt(width_sq)
+    return width, width_sq
+
+
+def fit_diamond_peaks(diamond_ws_name, bank_index):
+    """Fit diamond peaks on a single bank
+    Parameters
+    ----------
+    diamond_ws_name: str
+        Focused diamond peak workspace's name
+    bank_index: int
+        Workspace index for the bank to fit.  Note starting from 0.
+    Returns
+    -------
+    tuple
+    """
+    # Fit A, B, S for dSpacing
+    # Hard code expected diamond peak positions in dspacing
+    exp_d_centers = np.array([0.60309, 0.63073, 0.68665, 0.7283, 0.81854, 0.89198, 1.07577, 1.26146])
+
+    # Obtain peak parameters' starting values for fitting
+    A = STARTING_PROFILE_PARAMETERS['A'][bank_index]
+    B = STARTING_PROFILE_PARAMETERS['B'][bank_index]
+    S = STARTING_PROFILE_PARAMETERS['S'][bank_index]
+    width_factor = STARTING_PROFILE_PARAMETERS['W'][bank_index]
+
+    # Calculate peak width
+    width_vec, width_sq_vec = peak_width(exp_d_centers)
+
+    # Bank 5 has 1 less peak
+    if bank_index in [0, 1]:
+        exp_fit_d_centers = exp_d_centers[:]
+    else:
+        exp_fit_d_centers = exp_d_centers[:-1]
+
+    fit_window_list = ''
+    for i_peak, d_center in enumerate(exp_fit_d_centers):
+        left = d_center - 6 * width_vec[i_peak] * width_factor
+        right = d_center + 8 * width_vec[i_peak] * width_factor
+        print('Proposed window:', left, d_center, right)
+
+        if len(fit_window_list) > 0:
+            fit_window_list += ', '
+        fit_window_list += f'{left}, {right}'
+
+    # Set up for peak fitting
+    rightmost_peak_param_values = f'{A}, {B}, {S}'
+    peak_param_names = 'A, B, S'
+
+    peakpos_ws_name = f'{diamond_ws_name}_position_bank{bank_index}_{len(exp_fit_d_centers)}Peaks'
+    param_ws_name = f'{diamond_ws_name}_param_value_bank{bank_index}_{len(exp_fit_d_centers)}Peaks'
+    error_ws_name = f'{diamond_ws_name}_param_error_bank{bank_index}_{len(exp_fit_d_centers)}Peaks'
+    eff_value_ws_name = f'{diamond_ws_name}_eff_value_bank{bank_index}_{len(exp_fit_d_centers)}Peaks'
+    model_ws_name = f'{diamond_ws_name}_model_bank{bank_index}_{len(exp_fit_d_centers)}Peaks'
+
+    # Fit for raw S, A, and B
+    FitPeaks(InputWorkspace=diamond_ws_name,
+             StartWorkspaceIndex=bank_index,
+             StopWorkspaceIndex=bank_index,
+             PeakFunction="BackToBackExponential",
+             BackgroundType="Linear",
+             PeakCenters=exp_fit_d_centers,
+             FitWindowBoundaryList=fit_window_list,
+             PeakParameterNames=peak_param_names,
+             PeakParameterValues=rightmost_peak_param_values,
+             FitFromRight=True,
+             HighBackground=False,
+             OutputWorkspace=peakpos_ws_name,
+             OutputPeakParametersWorkspace=param_ws_name,
+             OutputParameterFitErrorsWorkspace=error_ws_name,
+             FittedPeaksWorkspace=model_ws_name)
+
+    # Fit for peak width
+    FitPeaks(InputWorkspace=diamond_ws_name,
+             StartWorkspaceIndex=bank_index,
+             StopWorkspaceIndex=bank_index,
+             PeakFunction="BackToBackExponential",
+             BackgroundType="Linear",
+             PeakCenters=exp_fit_d_centers,
+             FitWindowBoundaryList=fit_window_list,
+             PeakParameterNames=peak_param_names,
+             PeakParameterValues=rightmost_peak_param_values,
+             FitFromRight=True,
+             HighBackground=False,
+             OutputWorkspace=peakpos_ws_name,
+             OutputPeakParametersWorkspace=eff_value_ws_name,
+             RawPeakParameters=False)
+
+    # get fitted value and etc.
+    output1 = ''
+    output2 = ''
+
+    vec_exp_d = list()
+    vec_a = list()
+    vec_b = list()
+    vec_s = list()
+    vec_width = list()
+
+    for i_peak, d_center in enumerate(exp_fit_d_centers):
+        peak_pos = mtd[peakpos_ws_name].readY(0)[i_peak]
+        peak_pos_err = mtd[error_ws_name].cell(i_peak, 5)
+        f_a = mtd[param_ws_name].cell(i_peak, 3)
+        f_b = mtd[param_ws_name].cell(i_peak, 4)
+        f_s = mtd[param_ws_name].cell(i_peak, 6)
+        chi2 = mtd[param_ws_name].cell(i_peak, 9)
+        err_a = mtd[error_ws_name].cell(i_peak, 3)
+        err_b = mtd[error_ws_name].cell(i_peak, 4)
+        err_s = mtd[error_ws_name].cell(i_peak, 6)
+        width = mtd[eff_value_ws_name].cell(i_peak, 3)
+        height = mtd[eff_value_ws_name].cell(i_peak, 4)
+
+        op1 = f'd = {d_center:5f}: {f_a:5f} +/- {err_a:5f},  {f_b:5f} +/- {err_b:5f}, ' \
+              f'{f_s:5f} +/- {err_s:5f},  chi^2 = {chi2:5f}'
+        op2 = f'd = {d_center:5f}: X = {peak_pos:.8f} +/- {peak_pos_err:.8f}, FWHM = {width}, H = {height:5f}'
+
+        output1 += op1 + '\n'
+        output2 += op2 + '\n'
+
+        if chi2 < 1E10:
+            vec_exp_d.append(d_center)
+            vec_a.append(f_a)
+            vec_b.append(f_b)
+            vec_s.append(f_s)
+            vec_width.append(width)
+
+    print(output1)
+    print()
+    print(output2)
+
+    # return
+    vec_exp_d = np.array(vec_exp_d)
+    vec_a = np.array(vec_a)
+    vec_b = np.array(vec_b)
+    vec_s = np.array(vec_s)
+    vec_width = np.array(vec_width)
+
+    return vec_exp_d, vec_a, vec_b, vec_s, vec_width
+
+
+def peak_position_calibrate(focused_diamond_ws_name,
+                            grouping_plan: List[Tuple[int, Union[int, None], int]],
+                            src_diff_cal_h5,
+                            target_diff_cal_h5,
+                            output_dir):
+    # Fit peaks
+    tube_res_list = list()
+    pixel_range_left_list = list()
+    pixel_range_right_list = list()
+    last_focused_group_index = 0
+    for start_ws_index, step, end_ws_index in grouping_plan:
+        # calculate new workspace index range in the focused workspace
+        # NOTE that whatever in the grouping plan is for raw workspace!
+        if step:
+            num_groups = (end_ws_index - start_ws_index) // step
+        else:
+            num_groups = 1
+            step = end_ws_index - start_ws_index
+        start_group_index = last_focused_group_index
+        end_group_index = start_group_index + num_groups
+
+        # Pixel range
+        bank_group_left_pixels = list(np.arange(start_ws_index, end_ws_index, step))
+        bank_group_right_pixels = list(np.arange(start_ws_index, end_ws_index, step) + step)
+        # fit: num groups spectra
+        print(f'{focused_diamond_ws_name}: Fit from {start_group_index} to {end_group_index} (exclusive)')
+        bank_residual_list = fit_diamond_peaks(focused_diamond_ws_name, start_group_index, end_group_index, output_dir)
+
+        # sanity check
+        assert len(bank_residual_list) == end_group_index - start_group_index
+        # append
+        tube_res_list.extend(bank_residual_list)
+        pixel_range_left_list.extend(bank_group_left_pixels)
+        pixel_range_right_list.extend(bank_group_right_pixels)
+
+        # update
+        last_focused_group_index = end_group_index
+        # END-FOR
+
+    # apply 2nd round calibration to diffraction calibration file
+    # Load calibration file
+    calib_outputs = LoadDiffCal(Filename=src_diff_cal_h5,
+                                InputWorkspace=focused_diamond_ws_name,
+                                WorkspaceName='DiffCal_Vulcan')
+    diff_cal_table_name = str(calib_outputs.OutputCalWorkspace)
+
+    # apply  2nd-round calibration
+    apply_peaks_positions_calibration(diff_cal_table_name,
+                                      zip(tube_res_list, pixel_range_left_list, pixel_range_right_list))
+
+    # Target calibration file
+    if os.path.dirname(target_diff_cal_h5) == '':
+        target_diff_cal_h5 = os.path.join(output_dir, target_diff_cal_h5)
+
+    # Save to new diffraction calibration file
+    SaveDiffCal(CalibrationWorkspace=diff_cal_table_name,
+                GroupingWorkspace=calib_outputs.OutputGroupingWorkspace,
+                MaskWorkspace=calib_outputs.OutputMaskWorkspace,
+                Filename=target_diff_cal_h5)
+
+    return target_diff_cal_h5
+
+
+############################################ cross correlation code
 # TODO should be trapped in main check
 #if __name__ == '__main__':
 dia_runs = [192226, 192227] #, 192228, 192229, 192230]
-diamond_ws = load_and_crop(runnumbers=dia_runs, bin_step=-0.0003, bad_pulse_threashold=0, reload_instrument=True, convert_to_dspace=True)
+diamond_ws = load_and_crop(runnumbers=dia_runs, bin_step=-0.0003, bad_pulse_threashold=0, convert_to_dspace=True,
+                           user_idf='VULCAN')
 #cross_correlate_calibrate called in calibrate_vulcan_x.pyL298
 tube_cc_plan = cross_correlation_in_tubes()
 cc_calib_file, diamond_ws_name = cross_correlate_calibrate(diamond_ws, cross_correlate_param_dict = tube_cc_plan)
 print('file:', cc_calib_file)
 #create grouping for sub-sections of the instrument
+tube_grouping_plan = [(0, 512, 81920), (81920, 1024, 81920 * 2), (81920 * 2, 256, 200704)]  # TODO
 #AlignAndFocusPowder using that information
+cc_focus_ws_name, cc_focus_nexus = align_vulcan_data(diamond_runs=diamond_ws_name,
+                                                     diff_cal_file_name=cc_calib_file,
+                                                     output_dir='.', #output_dir,
+                                                     tube_grouping_plan=tube_grouping_plan,
+                                                     user_idf='VULCAN')
+
 #peak_position_calibrate in calibrate_vulcan_x.pyL319 (does this combine the two parts of the DIFC calculation?)
+final_calib_file = 'VULCAN_Calibration_Hybrid.h5'
+peak_position_calibrate(cc_focus_ws_name, tube_grouping_plan, cc_calib_file, final_calib_file, output_dir='.')
+
 #create the actual grouping workspace
+#group_ws = 'VULCAN_group_banks'
+#group_ws = CreateGroupingWorkspace(InputWorkspace=cc_focus_ws_name,
+#                                   GroupDetectorsBy='bank',
+#                                   OutputWorkspace=group_ws)
 #SaveDIFC
