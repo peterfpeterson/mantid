@@ -1,6 +1,6 @@
 from collections import namedtuple
 import h5py
-from mantid.simpleapi import (AlignDetectors, CloneWorkspace, CompressEvents, ConvertDiffCal, ConvertUnits, ConvertToMatrixWorkspace,
+from mantid.simpleapi import (AlignDetectors, CloneWorkspace, CompressEvents, ConvertDiffCal, ConvertUnits,
                               CreateGroupingWorkspace, CropWorkspace, CrossCorrelate, DeleteWorkspace, DiffractionFocussing,
                               FitPeaks, GeneratePythonScript, GetDetectorOffsets, LoadDiffCal, LoadEventAndCompress, LoadInstrument,
                               MaskDetectors, mtd, Plus, Rebin, SaveDiffCal, SaveNexusProcessed)
@@ -49,7 +49,7 @@ def load_and_crop(runnumbers, bin_step: float = -.001, tof_min: float = 500, tof
                   bad_pulse_threashold: float = 10, convert_to_dspace=False,
                   user_idf: str = ''):
     # put instrument name into filenames
-    filenames = [f'VULCAN_{runnum}' for runnum in runnumbers]
+    filenames = [str(runnum) for runnum in runnumbers]
     # workspace to accumulate to is just first runnumber
     dia_wksp = filenames[0]
 
@@ -778,23 +778,6 @@ def verify_vulcan_difc(ws_name: str,
     difc_h5.close()
 
 
-def create_groups(vulcan_ws_name=None) -> str:
-    """Create group workspace
-    """
-    # create group workspace
-    group_ws_name = 'VULCAN_3Bank_Groups'
-
-    # 3 group mode
-    group_ws = CreateGroupingWorkspace(InputWorkspace=vulcan_ws_name,
-                                       GroupDetectorsBy='bank',
-                                       OutputWorkspace=group_ws_name)
-
-    # sanity check
-    assert group_ws
-
-    return group_ws_name
-
-
 def export_difc(calib_ws_name, out_file_name):
     """
     Export DIFC file
@@ -919,7 +902,8 @@ def calibrate_vulcan(diamond_ws: str,
     # merge calibration result from bank-based cross correlation and  save calibration file
     # Export cross correlated result, DIFC and etc for analysis
     # Generate grouping workspace
-    grouping_ws_name = create_groups(diamond_ws_name)
+    grouping_ws_name = make_group_workspace(diamond_ws_name, group_ws_name='VULCAN_3Bank_Groups',
+                                            group_detectors_by='bank')
 
     output_calib_file_name = f'{diamond_ws_name}_Calibration_CC'
     calib_file_name = save_calibration(calib_ws_name=calib_ws_name,
@@ -1013,7 +997,8 @@ def cross_correlation_in_tubes():
 ############################################ pdcalibration-style
 def make_group_workspace(template_ws_name: str,
                          group_ws_name: str,
-                         grouping_plan: List[Tuple[int, int, int]]):
+                         group_detectors_by: str,
+                         grouping_plan: List[Tuple[int, int, int]] = []):
     """Create a GroupWorkspace with user specified group strategy
     Returns
     -------
@@ -1021,36 +1006,41 @@ def make_group_workspace(template_ws_name: str,
         Instance of the GroupingWorkspace generated
     """
     # Create an empty GroupWorkspace
-    group_ws = CreateGroupingWorkspace(InputWorkspace=template_ws_name,
-                                       GroupDetectorsBy='Group',
-                                       OutputWorkspace=group_ws_name)
-    group_ws = group_ws.OutputWorkspace
+    result = CreateGroupingWorkspace(InputWorkspace=template_ws_name,
+                                     GroupDetectorsBy=group_detectors_by,
+                                     OutputWorkspace=group_ws_name)
+    # sanity check
+    assert result.OutputWorkspace
+    assert result.NumberGroupsResult > 0, 'No output groups'
+
+    # more convenient handle to the workspace
+    group_ws = result.OutputWorkspace
 
     # Set customized group to each pixel
-    group_index = 1
-    for start_index, step_size, end_index in grouping_plan:
-        for ws_index in range(start_index, end_index, step_size):
-            # set values
-            for ws_shift in range(step_size):
-                group_ws.dataY(ws_index + ws_shift)[0] = group_index
-            # promote group index
-            group_index += 1
+    if grouping_plan:
+        group_index = 1
+        for start_index, step_size, end_index in grouping_plan:
+            for ws_index in range(start_index, end_index, step_size):
+                # set values
+                for ws_shift in range(step_size):
+                    group_ws.dataY(ws_index + ws_shift)[0] = group_index
+                # promote group index
+                group_index += 1
 
     return group_ws
 
 
-def align_focus_event_ws(event_ws_name,
-                         calib_ws_name: Union[str, None],
-                         group_ws_name: str,
-                         mask_ws_name: Union[str, None],
-                         customized_grouping_ws_name: Union[str, None],
-                         output_dir: str,
-                         save_workspace: bool = False) -> Tuple[str, str]:
+def __align_focus_event_ws(event_ws_name,
+                           calib_ws_name: str,
+                           group_ws_name: str,
+                           mask_ws_name: str,
+                           output_dir: str) -> str:
     """
     overwrite the input
     """
-    # determine tag
-    file_tag = ''
+    # Delete data we don't care about
+    if mask_ws_name:
+        MaskDetectors(Workspace=event_ws_name, MaskedWorkspace=mask_ws_name)
 
     # Align detector or not
     unit = mtd[event_ws_name].getAxis(0).getUnit().unitID()
@@ -1061,69 +1051,16 @@ def align_focus_event_ws(event_ws_name,
         # align detectors and convert unit to dSpacing
         AlignDetectors(InputWorkspace=event_ws_name, OutputWorkspace=event_ws_name,
                        CalibrationWorkspace=calib_ws_name)
-        file_tag += '_Cal'
-
     else:
         # optionally not align detectors: convert to dSpacing
         ConvertUnits(InputWorkspace=event_ws_name, OutputWorkspace=event_ws_name, Target='dSpacing')
-        file_tag += '_Raw'
 
     # Rebin
     Rebin(InputWorkspace=event_ws_name, OutputWorkspace=event_ws_name, Params='0.3,-0.0003,1.5')
 
-    if save_workspace:
-        # Save aligned but not focused workspace
-        # Convert to matrix workspace
-        matrix_ws_name = f'{event_ws_name}_matrix'
-        ConvertToMatrixWorkspace(InputWorkspace=event_ws_name, OutputWorkspace=matrix_ws_name)
-
-        # Save nexus for 2D alignment view
-        SaveNexusProcessed(InputWorkspace=matrix_ws_name,
-                           Filename=os.path.join(output_dir, f'{event_ws_name}{file_tag}.nxs'))
-        # remove matrix workspace after being saved
-        mtd.remove(matrix_ws_name)
-
-    # Mask group workspace
-    if mask_ws_name:
-        MaskDetectors(Workspace=group_ws_name, MaskedWorkspace=mask_ws_name)
-        file_tag += 'Masked'
-    else:
-        file_tag += '_Nomask'
-
-    # Diffraction focus to standard group
-    if customized_grouping_ws_name is not None:
-        if save_workspace:
-            # User requires to focus to customized groups:
-            # Do focus to the regular 3 banks and save
-            # Focus to matrix workspace and save
-            matrix_ws_name = f'{event_ws_name}_matrix'
-            DiffractionFocussing(InputWorkspace=event_ws_name, OutputWorkspace=matrix_ws_name,
-                                 GroupingWorkspace=group_ws_name, PreserveEvents=False)
-            focused_run_nxs = os.path.join(output_dir, f'{event_ws_name}{file_tag}_3banks.nxs')
-
-            SaveNexusProcessed(InputWorkspace=matrix_ws_name, Filename=focused_run_nxs)
-            # clean memory
-            mtd.remove(matrix_ws_name)
-
-        # Diffraction focus: original EventWorkspace is then aligned and focused for next step
-        DiffractionFocussing(InputWorkspace=event_ws_name, OutputWorkspace=event_ws_name,
-                             GroupingWorkspace=customized_grouping_ws_name, PreserveEvents=True)
-
-    else:
-        # focus with standard group and keep events
-        DiffractionFocussing(InputWorkspace=event_ws_name, OutputWorkspace=event_ws_name,
-                             GroupingWorkspace=group_ws_name, PreserveEvents=True)
-
-    # Convert from event workspace to workspace 2D
-    if save_workspace:
-        matrix_ws_name = f'{event_ws_name}_matrix'
-        ConvertToMatrixWorkspace(InputWorkspace=event_ws_name, OutputWorkspace=matrix_ws_name)
-        num_hist = mtd[event_ws_name].getNumberHistograms()
-        focused_run_nxs = os.path.join(output_dir, f'{event_ws_name}{file_tag}_{num_hist}banks.nxs')
-        SaveNexusProcessed(InputWorkspace=matrix_ws_name, Filename=focused_run_nxs)
-        mtd.remove(matrix_ws_name)
-    else:
-        focused_run_nxs = None
+    # focus with standard group and keep events
+    DiffractionFocussing(InputWorkspace=event_ws_name, OutputWorkspace=event_ws_name,
+                         GroupingWorkspace=group_ws_name, PreserveEvents=True)
 
     # Edit instrument geometry
     # NOTE: Disable EditInstrumentGeometry as
@@ -1133,55 +1070,16 @@ def align_focus_event_ws(event_ws_name,
     #                        Polar='89.9284,90.0716,150.059', Azimuthal='0,0,0', DetectorIDs='1-3',
     #                        InstrumentName='vulcan_3bank')
 
-    return event_ws_name, focused_run_nxs
+    return event_ws_name
 
 
-def load_calibration_file(calib_file_name: str,
-                          output_name: str,
-                          ref_ws_name: Union[None, str]):
-    """Load calibration diffraction file
-    Outputs are 'OutputCalWorkspace', 'OutputGroupingWorkspace', 'OutputMaskWorkspace'
-    Note:
-    - output_name:  this is NOT calibration workspace name but a base name for multiple calibration-related
-    workspaces
-    Parameters
-    ----------
-    calib_file_name
-    output_name: str
-        base name for calib, mask and group
-    ref_ws_name: str, None
-        reference VULCAN file
-    Returns
-    -------
-    ~tuple
-        1) output workspaces (2) output offsets workspace (as LoadDiffCal_returns cannot have an arbitrary member)
-    """
-    # check
-    assert os.path.exists(calib_file_name), f'Calibration file {calib_file_name} cannot be found.'
-
-    # determine file names
-    if calib_file_name.endswith('.h5'):
-        diff_cal_file = calib_file_name
-    else:
-        raise RuntimeError('Calibration file {} does not end with .h5 or .dat.  Unable to support'
-                           ''.format(calib_file_name))
-
-    # Load files: new diff calib file
-    print(f'About to loading {diff_cal_file} to {output_name} with reference to {ref_ws_name}')
-    outputs = LoadDiffCal(InputWorkspace=ref_ws_name,
-                          Filename=diff_cal_file,
-                          WorkspaceName=output_name)
-
-    return outputs
-
-
-def reduce_calibration(event_ws_name: str,
-                       calibration_file: str,
-                       user_idf: str = '',
-                       apply_mask=True,
-                       align_detectors=True,
-                       customized_group_ws_name: Union[str, None] = None,
-                       output_dir: str = os.getcwd()) -> Tuple[str, str]:
+def __reduce_calibration(event_ws_name: str,
+                         calibration_file: str,
+                         user_idf: str = '',
+                         apply_mask=True,
+                         align_detectors=True,
+                         customized_group_ws_name: Union[str, None] = None,
+                         output_dir: str = os.getcwd()) -> str:
     """Reduce data to test calibration
     If a customized group workspace is specified, the native 3-bank will be still focused and saved.
     But the return value will be focused on the customized groups
@@ -1205,11 +1103,16 @@ def reduce_calibration(event_ws_name: str,
         focused workspace name, path to processed nexus file saved from focused workspace
     """
     # Load calibration file
-    calib_tuple = load_calibration_file(calibration_file, 'VulcanX_PD_Calib', event_ws_name)
+
+    calib_tuple = LoadDiffCal(InputWorkspace=event_ws_name,
+                              Filename=calibration_file,
+                              WorkspaceName='VulcanX_PD_Calib')
     calib_cal_ws = calib_tuple.OutputCalWorkspace
     calib_group_ws = calib_tuple.OutputGroupingWorkspace
     calib_mask_ws = calib_tuple.OutputMaskWorkspace
 
+    if customized_group_ws_name:
+        calib_group_ws = customized_group_ws_name  # TODO don't create the other one in this case
     # Load instrument
     if user_idf:
         LoadInstrument(Workspace=event_ws_name,
@@ -1220,21 +1123,19 @@ def reduce_calibration(event_ws_name: str,
         align_detectors = False
 
     # Align, focus and export
-    focused_tuple = align_focus_event_ws(event_ws_name,
-                                         str(calib_cal_ws) if align_detectors else None,
-                                         str(calib_group_ws),
-                                         str(calib_mask_ws) if apply_mask else None,
-                                         customized_group_ws_name,
-                                         output_dir=output_dir)
-
-    return focused_tuple
+    return __align_focus_event_ws(event_ws_name,
+                                  str(calib_cal_ws) if align_detectors else '',
+                                  str(calib_group_ws),
+                                  str(calib_mask_ws) if apply_mask else '',
+                                  output_dir=output_dir)
 
 
 def align_vulcan_data(diamond_runs: Union[str, List[Union[int, str]]],
                       diff_cal_file_name: str,
                       output_dir: str,
                       tube_grouping_plan: List[Tuple[int, int, int]],
-                      user_idf: str = '') -> Tuple[str, str]:
+                      user_idf: str = '',
+                      bad_pulse_threashold: float=0) -> str:
     """
     Parameters
     ----------
@@ -1248,6 +1149,7 @@ def align_vulcan_data(diamond_runs: Union[str, List[Union[int, str]]],
     Returns
     -------
     """
+    # load data if it isn't already
     if isinstance(diamond_runs, str):
         # Check a valid workspace
         assert mtd.doesExist(diamond_runs)
@@ -1255,24 +1157,22 @@ def align_vulcan_data(diamond_runs: Union[str, List[Union[int, str]]],
     else:
         # must be a list of nexus file names or runs
         # diamond_runs, user_idf, output_dir
-        diamond_ws_name = load_and_crop(diamond_runs)
+        diamond_ws_name = str(load_and_crop(diamond_runs, user_idf=user_idf, bad_pulse_threashold=0))
 
     # TODO FIXME - shall this method be revealed to the client?
     if tube_grouping_plan:
-        tube_group_ws_name = 'TubeGroup'
-        tube_group = make_group_workspace(diamond_ws_name, tube_group_ws_name, tube_grouping_plan)
+        tube_group = make_group_workspace(diamond_ws_name, group_ws_name='TubeGroup',
+                                          group_detectors_by='Group', grouping_plan=tube_grouping_plan)
     else:
         tube_group = None
 
-    focused_ws_name, focused_nexus = reduce_calibration(diamond_ws_name,
-                                                        calibration_file=diff_cal_file_name,
-                                                        user_idf=user_idf,
-                                                        apply_mask=True,
-                                                        align_detectors=True,
-                                                        customized_group_ws_name=tube_group,
-                                                        output_dir=output_dir)
-
-    return focused_ws_name, focused_nexus
+    return __reduce_calibration(diamond_ws_name,
+                                calibration_file=diff_cal_file_name,
+                                user_idf=user_idf,
+                                apply_mask=True,
+                                align_detectors=True,
+                                customized_group_ws_name=tube_group,
+                                output_dir=output_dir)
 
 
 class Res(object):
@@ -1572,34 +1472,3 @@ def peak_position_calibrate(focused_diamond_ws_name,
                 Filename=target_diff_cal_h5)
 
     return target_diff_cal_h5
-
-
-############################################ cross correlation code
-# TODO should be trapped in main check
-#if __name__ == '__main__':
-dia_runs = [192226, 192227] #, 192228, 192229, 192230]
-diamond_ws = load_and_crop(runnumbers=dia_runs, bin_step=-0.0003, bad_pulse_threashold=0, convert_to_dspace=True,
-                           user_idf='VULCAN')
-#cross_correlate_calibrate called in calibrate_vulcan_x.pyL298
-tube_cc_plan = cross_correlation_in_tubes()
-cc_calib_file, diamond_ws_name = cross_correlate_calibrate(diamond_ws, cross_correlate_param_dict = tube_cc_plan)
-print('file:', cc_calib_file)
-#create grouping for sub-sections of the instrument
-tube_grouping_plan = [(0, 512, 81920), (81920, 1024, 81920 * 2), (81920 * 2, 256, 200704)]  # TODO
-#AlignAndFocusPowder using that information
-cc_focus_ws_name, cc_focus_nexus = align_vulcan_data(diamond_runs=diamond_ws_name,
-                                                     diff_cal_file_name=cc_calib_file,
-                                                     output_dir='.', #output_dir,
-                                                     tube_grouping_plan=tube_grouping_plan,
-                                                     user_idf='VULCAN')
-
-#peak_position_calibrate in calibrate_vulcan_x.pyL319 (does this combine the two parts of the DIFC calculation?)
-final_calib_file = 'VULCAN_Calibration_Hybrid.h5'
-peak_position_calibrate(cc_focus_ws_name, tube_grouping_plan, cc_calib_file, final_calib_file, output_dir='.')
-
-#create the actual grouping workspace
-#group_ws = 'VULCAN_group_banks'
-#group_ws = CreateGroupingWorkspace(InputWorkspace=cc_focus_ws_name,
-#                                   GroupDetectorsBy='bank',
-#                                   OutputWorkspace=group_ws)
-#SaveDIFC
