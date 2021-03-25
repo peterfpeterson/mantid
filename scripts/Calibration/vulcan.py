@@ -778,24 +778,6 @@ def verify_vulcan_difc(ws_name: str,
     difc_h5.close()
 
 
-def export_difc(calib_ws_name, out_file_name):
-    """
-    Export DIFC file
-    :param calib_ws_name:
-    :param out_file_name:
-    :return:
-    """
-    calib_ws = retrieve_workspace(calib_ws_name)
-
-    wbuf = '{}\n'.format(calib_ws.getColumnNames())
-    for ir in range(calib_ws.rowCount()):
-        wbuf += '{}   {}   {}\n'.format(calib_ws.cell(ir, 0), calib_ws.cell(ir, 1), calib_ws.cell(ir, 2))
-
-    out_file = open(out_file_name, 'w')
-    out_file.write(wbuf)
-    out_file.close()
-
-
 def save_calibration(calib_ws_name: str,
                      mask_ws_name: str,
                      group_ws_name: str,
@@ -840,10 +822,6 @@ def save_calibration(calib_ws_name: str,
     # FIXME - I doubt how many useful information can be saved
     py_name = os.path.join(output_dir, calib_file_prefix + '.py')
     GeneratePythonScript(InputWorkspace=calib_ws_name, Filename=py_name)
-
-    # Save DIFC
-    difc_file_name = os.path.join(output_dir, calib_file_prefix + '_difc.dat')
-    export_difc(calib_ws_name, difc_file_name)
 
     return out_file_name
 
