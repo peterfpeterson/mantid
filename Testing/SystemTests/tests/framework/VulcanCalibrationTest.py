@@ -13,8 +13,11 @@ from Calibration.vulcan import load_and_crop, cross_correlate_calibrate, align_v
 #from vulcan.calibration.calibrate_vulcan_x import align_vulcan_data, cross_correlate_calibrate, peak_position_calibrate
 
 
-class VulcanCalibrationTest(systemtesting.MantidSystemTest): # unittest.TestCase):
-    diamond_files = ["VULCAN_192226.nxs.h5"]
+VULCAN_192226_RAW = "VULCAN_192226.nxs.h5"
+
+
+class CrossCorrelationTest(systemtesting.MantidSystemTest):
+    diamond_files = [VULCAN_192226_RAW]
 
     def requiredFiles(self):
         return self.diamond_files
@@ -56,6 +59,35 @@ class VulcanCalibrationTest(systemtesting.MantidSystemTest): # unittest.TestCase
 
     #def validate(self):
     #    pass
+
+
+class AlignInDSpacingTest(systemtesting.MantidSystemTest):
+    PREVIOUS_CALIBRATION = "VULCAN_192245_Calibration_CC.h5"  # TODO not on external data server
+    DIAMOND_FILES = [VULCAN_192226_RAW]
+
+    def requiredFiles(self):
+        return [self.PREVIOUS_CALIBRATION] + self.DIAMOND_FILES
+
+    def runTest(self):
+        tube_grouping_plan = None  # TODO should be portions of the instrument
+        test_output_dir = tempfile.gettempdir()
+        calibration_file = os.path.join(test_output_dir, "VULCAN_Calibration_Hybrid_result.h5")
+
+        cc_focus_ws_name = align_vulcan_data(diamond_runs=self.DIAMOND_FILES,
+                                             diff_cal_file_name=self.PREVIOUS_CALIBRATION,
+                                             output_dir=test_output_dir,
+                                             tube_grouping_plan=tube_grouping_plan)
+
+        # step_3:
+        tube_grouping_plan = [(0, None, 81920), (81920, None, 81920 * 2), (81920 * 2, None, 200704)]
+        peak_position_calibrate(cc_focus_ws_name, tube_grouping_plan, self.PREVIOUS_CALIBRATION, calibration_file,
+                                test_output_dir)
+
+        # verify calibration file is created
+        # NOTE: this is step 1, we will add more reliable asseration once
+        #       we have a reference calibration results
+        assert os.path.exists(calibration_file)
+        os.remove(calibration_file)
 
 
 '''OLD prototype code
