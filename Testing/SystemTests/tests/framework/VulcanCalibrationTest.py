@@ -5,18 +5,17 @@
 #   Institut Laue - Langevin & CSNS, Institute of High Energy Physics, CAS
 # SPDX - License - Identifier: GPL - 3.0 +
 
-import unittest
+import numpy as np
 import os
 import systemtesting
 import tempfile
-from Calibration.vulcan import load_and_crop, cross_correlate_calibrate, align_vulcan_data, peak_position_calibrate
-#from vulcan.calibration.calibrate_vulcan_x import align_vulcan_data, cross_correlate_calibrate, peak_position_calibrate
+from Calibration.vulcan import load_and_crop, cross_correlate_calibrate, align_data, peak_position_calibrate
 
 
 VULCAN_192226_RAW = "VULCAN_192226.nxs.h5"
 
 
-class CrossCorrelationTest(systemtesting.MantidSystemTest):
+class CrossCorrelationTest(): #systemtesting.MantidSystemTest):
     diamond_files = [VULCAN_192226_RAW]
 
     def requiredFiles(self):
@@ -38,11 +37,10 @@ class CrossCorrelationTest(systemtesting.MantidSystemTest):
         print('CC CALIBRATION:', cc_calib_file)
 
         # step_2:
-        cc_focus_ws_name = align_vulcan_data(
-            diamond_runs=[diamond_ws],  # TODO second round should go from file
-            diff_cal_file_name=cc_calib_file,
-            output_dir=test_output_dir,
-            tube_grouping_plan=tube_grouping_plan)
+        cc_focus_ws_name = align_data(diamond_runs=[diamond_ws],  # TODO second round should go from file
+                                      diff_cal_file_name=cc_calib_file,
+                                      output_dir=test_output_dir,
+                                      tube_grouping_plan=tube_grouping_plan)
 
         # step_3:
         tube_grouping_plan = [(0, None, 81920), (81920, None, 81920 * 2), (81920 * 2, None, 200704)]
@@ -61,7 +59,56 @@ class CrossCorrelationTest(systemtesting.MantidSystemTest):
     #    pass
 
 
-class AlignInDSpacingTest(systemtesting.MantidSystemTest):
+class AlignDataBankTest(systemtesting.MantidSystemTest):
+    PREVIOUS_CALIBRATION = "VULCAN_192245_Calibration_CC.h5"  # TODO not on external data server
+    DIAMOND_FILES = [VULCAN_192226_RAW]
+
+    def requiredFiles(self):
+        return [self.PREVIOUS_CALIBRATION] + self.DIAMOND_FILES
+
+    def runTest(self):
+        test_output_dir = tempfile.gettempdir()
+
+        focus_ws = align_data(diamond_runs=self.DIAMOND_FILES,
+                              diff_cal_file_name=self.PREVIOUS_CALIBRATION,
+                              output_dir=test_output_dir,
+                              tube_grouping_plan=None)
+        assert focus_ws.getNumberHistograms() == 3
+        units = focus_ws.getAxis(0).getUnit().unitID()
+        assert units == 'dSpacing'
+        for i in range(focus_ws.getNumberHistograms()):
+            x = focus_ws.readX(i)
+            print(x[0], x[-1])
+            assert np.alltrue(x >= 0.3), "d-spacing >= 0.3"
+            assert np.alltrue(x < 1.5), "d-spacing < 1.5"
+
+
+class AlignDataSubBankTest(systemtesting.MantidSystemTest):
+    PREVIOUS_CALIBRATION = "VULCAN_192245_Calibration_CC.h5"  # TODO not on external data server
+    DIAMOND_FILES = [VULCAN_192226_RAW]
+
+    def requiredFiles(self):
+        return [self.PREVIOUS_CALIBRATION] + self.DIAMOND_FILES
+
+    def runTest(self):
+        test_output_dir = tempfile.gettempdir()
+
+        tube_grouping_plan = [(0, None, 81920), (81920, None, 81920 * 2), (81920 * 2, None, 200704)]
+        focus_ws = align_data(diamond_runs=self.DIAMOND_FILES,
+                              diff_cal_file_name=self.PREVIOUS_CALIBRATION,
+                              output_dir=test_output_dir,
+                              tube_grouping_plan=tube_grouping_plan)
+        assert focus_ws.getNumberHistograms() == 3
+        units = focus_ws.getAxis(0).getUnit().unitID()
+        assert units == 'dSpacing'
+        for i in range(focus_ws.getNumberHistograms()):
+            x = focus_ws.readX(i)
+            print(x[0], x[-1])
+            assert np.alltrue(x >= 0.3), "d-spacing >= 0.3"
+            assert np.alltrue(x < 1.5), "d-spacing < 1.5"
+
+
+class PositionCalibrationTest(): # systemtesting.MantidSystemTest):
     PREVIOUS_CALIBRATION = "VULCAN_192245_Calibration_CC.h5"  # TODO not on external data server
     DIAMOND_FILES = [VULCAN_192226_RAW]
 
@@ -73,14 +120,22 @@ class AlignInDSpacingTest(systemtesting.MantidSystemTest):
         test_output_dir = tempfile.gettempdir()
         calibration_file = os.path.join(test_output_dir, "VULCAN_Calibration_Hybrid_result.h5")
 
-        cc_focus_ws_name = align_vulcan_data(diamond_runs=self.DIAMOND_FILES,
-                                             diff_cal_file_name=self.PREVIOUS_CALIBRATION,
-                                             output_dir=test_output_dir,
-                                             tube_grouping_plan=tube_grouping_plan)
+        focus_ws = align_data(diamond_runs=self.DIAMOND_FILES,
+                              diff_cal_file_name=self.PREVIOUS_CALIBRATION,
+                              output_dir=test_output_dir,
+                              tube_grouping_plan=tube_grouping_plan)
+        assert focus_ws.getNumberHistograms() == 3
+        units = focus_ws.getAxis(0).getUnit().unitID()
+        assert units == 'dSpacing'
+        for i in range(focus_ws.getNumberHistograms()):
+            x = focus_ws.readX(i)
+            print(x[0], x[-1])
+            assert np.alltrue(x >= 0.3), "d-spacing >= 0.3"
+            assert np.alltrue(x < 1.5), "d-spacing < 1.5"
 
         # step_3:
         tube_grouping_plan = [(0, None, 81920), (81920, None, 81920 * 2), (81920 * 2, None, 200704)]
-        peak_position_calibrate(cc_focus_ws_name, tube_grouping_plan, self.PREVIOUS_CALIBRATION, calibration_file,
+        peak_position_calibrate(str(focus_ws), tube_grouping_plan, self.PREVIOUS_CALIBRATION, calibration_file,
                                 test_output_dir)
 
         # verify calibration file is created
@@ -118,5 +173,3 @@ peak_position_calibrate(cc_focus_ws_name, tube_grouping_plan, cc_calib_file, fin
 #                                   OutputWorkspace=group_ws)
 #SaveDIFC
 '''
-if __name__ == "__main__":
-    unittest.main()

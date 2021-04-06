@@ -6,7 +6,7 @@ from mantid.simpleapi import (AlignDetectors, CloneWorkspace, CompressEvents, Co
                               MaskDetectors, mtd, Plus, Rebin, SaveDiffCal, SaveNexusProcessed)
 import numpy as np
 import os
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, Iterator, List, Tuple, Union
 
 CAL_TABLE_DIFC_COLUMN = 1   # TODO should be done through introspection
 CAL_TABLE_TZERO_COLUMN = 3   # TODO should be done through introspection
@@ -23,12 +23,6 @@ VULCAN_X_PIXEL_RANGE = {'Bank1': (0, 81920),  # 160 tubes
                         'Bank5': (163840, 200704)   # 72 tubes
                         }
 VULCAN_X_PIXEL_NUMBER = 200704
-
-# This is VULCAN variables
-STARTING_PROFILE_PARAMETERS = {'A': [1030., 752., 2535],
-                               'B': [1030., 752., 1282],
-                               'S': [0.002, 0.002, 0.00057],
-                               'W': [5, 5, 1]}
 
 
 ############################################ cross correlation code
@@ -1013,7 +1007,7 @@ def __align_focus_event_ws(event_ws_name,
                            calib_ws_name: str,
                            group_ws_name: str,
                            mask_ws_name: str,
-                           output_dir: str) -> str:
+                           output_dir: str) -> Any:
     """
     overwrite the input
     """
@@ -1049,16 +1043,14 @@ def __align_focus_event_ws(event_ws_name,
     #                        Polar='89.9284,90.0716,150.059', Azimuthal='0,0,0', DetectorIDs='1-3',
     #                        InstrumentName='vulcan_3bank')
 
-    return event_ws_name
+    return mtd[str(event_ws_name)]
 
 
 def __reduce_calibration(event_ws_name: str,
                          calibration_file: str,
                          user_idf: str = '',
-                         apply_mask=True,
-                         align_detectors=True,
                          customized_group_ws_name: Union[str, None] = None,
-                         output_dir: str = os.getcwd()) -> str:
+                         output_dir: str = os.getcwd()) -> Any:
     """Reduce data to test calibration
     If a customized group workspace is specified, the native 3-bank will be still focused and saved.
     But the return value will be focused on the customized groups
@@ -1085,14 +1077,17 @@ def __reduce_calibration(event_ws_name: str,
 
     calib_tuple = LoadDiffCal(InputWorkspace=event_ws_name,
                               Filename=calibration_file,
+                              MakeGroupingWorkspace=not bool(customized_group_ws_name),
                               WorkspaceName='VulcanX_PD_Calib')
     calib_cal_ws = calib_tuple.OutputCalWorkspace
-    calib_group_ws = calib_tuple.OutputGroupingWorkspace
     calib_mask_ws = calib_tuple.OutputMaskWorkspace
-
     if customized_group_ws_name:
-        calib_group_ws = customized_group_ws_name  # TODO don't create the other one in this case
+        calib_group_ws = customized_group_ws_name
+    else:
+        calib_group_ws = calib_tuple.OutputGroupingWorkspace
+
     # Load instrument
+    align_detectors = True
     if user_idf:
         LoadInstrument(Workspace=event_ws_name,
                        Filename=user_idf,
@@ -1105,16 +1100,16 @@ def __reduce_calibration(event_ws_name: str,
     return __align_focus_event_ws(event_ws_name,
                                   str(calib_cal_ws) if align_detectors else '',
                                   str(calib_group_ws),
-                                  str(calib_mask_ws) if apply_mask else '',
+                                  str(calib_mask_ws),
                                   output_dir=output_dir)
 
 
-def align_vulcan_data(diamond_runs: Union[str, List[Union[int, str]]],
-                      diff_cal_file_name: str,
-                      output_dir: str,
-                      tube_grouping_plan: List[Tuple[int, int, int]],
-                      user_idf: str = '',
-                      bad_pulse_threashold: float=0) -> str:
+def align_data(diamond_runs: Union[str, List[str]],
+               diff_cal_file_name: str,
+               output_dir: str,
+               tube_grouping_plan: List[Tuple[int, int, int]],
+               user_idf: str = '',
+               bad_pulse_threashold: float=0) -> Any:
     """
     Parameters
     ----------
@@ -1141,15 +1136,13 @@ def align_vulcan_data(diamond_runs: Union[str, List[Union[int, str]]],
     # TODO FIXME - shall this method be revealed to the client?
     if tube_grouping_plan:
         tube_group = make_group_workspace(diamond_ws_name, group_ws_name='TubeGroup',
-                                          group_detectors_by='Group', grouping_plan=tube_grouping_plan)
+                                          group_detectors_by='bank', grouping_plan=tube_grouping_plan)
     else:
         tube_group = None
 
     return __reduce_calibration(diamond_ws_name,
                                 calibration_file=diff_cal_file_name,
                                 user_idf=user_idf,
-                                apply_mask=True,
-                                align_detectors=True,
                                 customized_group_ws_name=tube_group,
                                 output_dir=output_dir)
 
@@ -1219,7 +1212,7 @@ def update_calibration_table(cal_table, residual, start_index, end_index):
 
 
 def apply_peaks_positions_calibration(diff_cal_table_name: str,
-                                      residual_list: List[Tuple[Res, int, int]]):
+                                      residual_list: Iterator[Tuple[Res, int, int]]):
     """Apply DIFC and T0 shift to original diffraction calibration table
     Apply d = a + b * d' to TOF = DIFC * d'
     Parameters
@@ -1292,7 +1285,7 @@ def cal_back_to_back_exponential_fwhm(a: float, b: float, s: float) -> float:
     return fwhm
 
 
-def process_fit_result(peak_pos_ws_name, param_ws_name, param_error_ws_name, num_peaks, relative_group_index):
+def __process_fit_result(peak_pos_ws_name, param_ws_name, param_error_ws_name, num_peaks, relative_group_index):
     # work include
     # 1. get peak positions and errors
     # 2. get fitted peak parameters (A, B, S)
@@ -1370,7 +1363,7 @@ def process_fit_result(peak_pos_ws_name, param_ws_name, param_error_ws_name, num
     return param_value_dict, param_error_dict
 
 
-def calibrate_peak_positions(exp_pos_vec, calibrated_pos_vec, pos_error_vec, peak_width_vec,  poly_order=1):
+def __calibrate_peak_positions(exp_pos_vec, calibrated_pos_vec, pos_error_vec, peak_width_vec,  poly_order=1):
 
     # TODO can be changed to 2 only after we find out how to do the math to superpose with DIFC
     if poly_order != 1:
@@ -1400,10 +1393,10 @@ def calibrate_peak_positions(exp_pos_vec, calibrated_pos_vec, pos_error_vec, pea
     return my_model, res
 
 
-def fit_diamond_peaks(diamond_ws_name: str,
-                      start_group_index: int,
-                      end_group_index: int,
-                      output_dir: Union[str, None]) -> List[Res]:
+def __fit_diamond_peaks(diamond_ws_name: str,
+                        start_group_index: int,
+                        end_group_index: int,
+                        output_dir: Union[str, None]) -> List[Res]:
     """Fit diamond peaks from a workspace
     Parameters
     ----------
@@ -1459,8 +1452,8 @@ def fit_diamond_peaks(diamond_ws_name: str,
     num_peaks = len(exp_centers)
     fit_result_list = list()
     for group_index in range(start_group_index, end_group_index):
-        param_value_dict, param_error_dict = process_fit_result(out_ws_name, param_ws_name, error_ws_name, num_peaks,
-                                                                group_index - start_group_index)
+        param_value_dict, param_error_dict = __process_fit_result(out_ws_name, param_ws_name, error_ws_name, num_peaks,
+                                                                  group_index - start_group_index)
         fit_result_list.append((param_value_dict, param_error_dict))
 
         # report TODO is this covered elsewhere?
@@ -1471,11 +1464,11 @@ def fit_diamond_peaks(diamond_ws_name: str,
     calibrated_residual_list = list()
     for group_index in range(start_group_index, end_group_index):
         param_value_dict, param_error_dict = fit_result_list[group_index - start_group_index]
-        calib_model, calib_res = calibrate_peak_positions(exp_pos_vec=param_value_dict['ExpectedX0'],
-                                                          calibrated_pos_vec=param_value_dict['X0'],
-                                                          pos_error_vec=param_error_dict['X0'],
-                                                          peak_width_vec=param_value_dict['S'],
-                                                          poly_order=1)
+        calib_model, calib_res = __calibrate_peak_positions(exp_pos_vec=param_value_dict['ExpectedX0'],
+                                                            calibrated_pos_vec=param_value_dict['X0'],
+                                                            pos_error_vec=param_error_dict['X0'],
+                                                            peak_width_vec=param_value_dict['S'],
+                                                            poly_order=1)
         # plot/report TODO is this covered elsewhere?
         # plot_predicted_calibrated_peak_positions(param_value_dict['ExpectedX0'],
         #                                          calib_model, param_value_dict['X0'],
@@ -1487,7 +1480,7 @@ def fit_diamond_peaks(diamond_ws_name: str,
     return calibrated_residual_list
 
 
-def peak_position_calibrate(focused_diamond_ws_name,
+def peak_position_calibrate(focused_diamond_ws,
                             grouping_plan: List[Tuple[int, Union[int, None], int]],
                             src_diff_cal_h5,
                             target_diff_cal_h5,
@@ -1496,6 +1489,7 @@ def peak_position_calibrate(focused_diamond_ws_name,
     tube_res_list = list()
     pixel_range_left_list = list()
     pixel_range_right_list = list()
+    focused_diamond_ws_name = str(focused_diamond_ws)
     last_focused_group_index = 0
     for start_ws_index, step, end_ws_index in grouping_plan:
         # calculate new workspace index range in the focused workspace
@@ -1513,7 +1507,7 @@ def peak_position_calibrate(focused_diamond_ws_name,
         bank_group_right_pixels = list(np.arange(start_ws_index, end_ws_index, step) + step)
         # fit: num groups spectra
         print(f'{focused_diamond_ws_name}: Fit from {start_group_index} to {end_group_index} (exclusive)')
-        bank_residual_list = fit_diamond_peaks(focused_diamond_ws_name, start_group_index, end_group_index, output_dir)
+        bank_residual_list = __fit_diamond_peaks(focused_diamond_ws_name, start_group_index, end_group_index, output_dir)
 
         # sanity check
         assert len(bank_residual_list) == end_group_index - start_group_index
