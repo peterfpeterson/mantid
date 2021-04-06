@@ -991,6 +991,7 @@ def make_group_workspace(template_ws_name: str,
 
     # Set customized group to each pixel
     if grouping_plan:
+        assert len(grouping_plan) == result.NumberGroupsResult
         group_index = 1
         for start_index, step_size, end_index in grouping_plan:
             for ws_index in range(start_index, end_index, step_size):

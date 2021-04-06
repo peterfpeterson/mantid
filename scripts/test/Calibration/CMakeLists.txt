@@ -4,6 +4,7 @@ set(TEST_PY_FILES
     test_ideal_tube.py
     test_tube.py
     test_tube_calib.py
+    VulcanTest.py
     )
 
 add_subdirectory(tofpd)
