@@ -1,9 +1,9 @@
 from collections import namedtuple
 import h5py
-from mantid.simpleapi import (AlignDetectors, CloneWorkspace, CompressEvents, ConvertDiffCal, ConvertUnits,
-                              CreateGroupingWorkspace, CropWorkspace, CrossCorrelate, DeleteWorkspace, DiffractionFocussing,
+from mantid.simpleapi import (AlignAndFocusPowder, CloneWorkspace, CompressEvents, ConvertDiffCal, ConvertUnits,
+                              CreateGroupingWorkspace, CropWorkspace, CrossCorrelate, DeleteWorkspace,
                               FitPeaks, GeneratePythonScript, GetDetectorOffsets, LoadDiffCal, LoadEventAndCompress, LoadInstrument,
-                              MaskDetectors, mtd, Plus, Rebin, SaveDiffCal, SaveNexusProcessed)
+                              mtd, Plus, Rebin, SaveDiffCal, SaveNexusProcessed)
 import numpy as np
 import os
 from typing import Any, Dict, Iterator, List, Tuple, Union
@@ -1004,49 +1004,6 @@ def make_group_workspace(template_ws_name: str,
     return group_ws
 
 
-def __align_focus_event_ws(event_ws_name,
-                           calib_ws_name: str,
-                           group_ws_name: str,
-                           mask_ws_name: str,
-                           output_dir: str) -> Any:
-    """
-    overwrite the input
-    """
-    # Delete data we don't care about
-    if mask_ws_name:
-        MaskDetectors(Workspace=event_ws_name, MaskedWorkspace=mask_ws_name)
-
-    # Align detector or not
-    unit = mtd[event_ws_name].getAxis(0).getUnit().unitID()
-    if unit != 'TOF':
-        ConvertUnits(InputWorkspace=event_ws_name, OutputWorkspace=event_ws_name, Target='TOF')
-
-    if calib_ws_name:
-        # align detectors and convert unit to dSpacing
-        AlignDetectors(InputWorkspace=event_ws_name, OutputWorkspace=event_ws_name,
-                       CalibrationWorkspace=calib_ws_name)
-    else:
-        # optionally not align detectors: convert to dSpacing
-        ConvertUnits(InputWorkspace=event_ws_name, OutputWorkspace=event_ws_name, Target='dSpacing')
-
-    # Rebin
-    Rebin(InputWorkspace=event_ws_name, OutputWorkspace=event_ws_name, Params='0.3,-0.0003,1.5')
-
-    # focus with standard group and keep events
-    DiffractionFocussing(InputWorkspace=event_ws_name, OutputWorkspace=event_ws_name,
-                         GroupingWorkspace=group_ws_name, PreserveEvents=True)
-
-    # Edit instrument geometry
-    # NOTE: Disable EditInstrumentGeometry as
-    #   1.  The geometry information won't be saved to processed NeXus
-    #   2.  It destroys the geometry information that can be used for FitPeaks with instrument parameters
-    # EditInstrumentGeometry(Workspace=event_ws_name, PrimaryFlightPath=42, SpectrumIDs='1-3', L2='2,2,2',
-    #                        Polar='89.9284,90.0716,150.059', Azimuthal='0,0,0', DetectorIDs='1-3',
-    #                        InstrumentName='vulcan_3bank')
-
-    return mtd[str(event_ws_name)]
-
-
 def __reduce_calibration(event_ws_name: str,
                          calibration_file: str,
                          user_idf: str = '',
@@ -1088,21 +1045,23 @@ def __reduce_calibration(event_ws_name: str,
         calib_group_ws = calib_tuple.OutputGroupingWorkspace
 
     # Load instrument
-    align_detectors = True
     if user_idf:
         LoadInstrument(Workspace=event_ws_name,
                        Filename=user_idf,
                        InstrumentName='VULCAN',
                        RewriteSpectraMap=True)
-        # auto disable align detector
-        align_detectors = False
 
-    # Align, focus and export
-    return __align_focus_event_ws(event_ws_name,
-                                  str(calib_cal_ws) if align_detectors else '',
-                                  str(calib_group_ws),
-                                  str(calib_mask_ws),
-                                  output_dir=output_dir)
+    # in-place operation
+    AlignAndFocusPowder(InputWorkspace=event_ws_name, OutputWorkspace=event_ws_name,
+                        GroupingWorkspace=calib_group_ws,
+                        CalibrationWorkspace=calib_cal_ws,
+                        MaskWorkspace=calib_mask_ws,
+                        Dspacing=True,  # bin in d-spacing
+                        Params=(0.3,-0.0003,1.5))
+    # AlignAndFocusPowder puts things back in time-of-flight
+    ConvertUnits(InputWorkspace=event_ws_name, OutputWorkspace=event_ws_name, Target='dSpacing')
+
+    return mtd[str(event_ws_name)]
 
 
 def align_data(diamond_runs: Union[str, List[str]],

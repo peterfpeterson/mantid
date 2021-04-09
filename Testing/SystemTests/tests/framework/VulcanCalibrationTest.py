@@ -15,7 +15,7 @@ from Calibration.vulcan import load_and_crop, cross_correlate_calibrate, align_d
 VULCAN_192226_RAW = "VULCAN_192226.nxs.h5"
 
 
-class CrossCorrelationTest(): #systemtesting.MantidSystemTest):
+class CrossCorrelationTest(systemtesting.MantidSystemTest):
     diamond_files = [VULCAN_192226_RAW]
 
     def requiredFiles(self):
@@ -78,7 +78,6 @@ class AlignDataBankTest(systemtesting.MantidSystemTest):
         assert units == 'dSpacing'
         for i in range(focus_ws.getNumberHistograms()):
             x = focus_ws.readX(i)
-            print(x[0], x[-1])
             assert np.alltrue(x >= 0.3), "d-spacing >= 0.3"
             assert np.alltrue(x < 1.5), "d-spacing < 1.5"
 
@@ -93,22 +92,32 @@ class AlignDataSubBankTest(systemtesting.MantidSystemTest):
     def runTest(self):
         test_output_dir = tempfile.gettempdir()
 
-        tube_grouping_plan = [(0, None, 81920), (81920, None, 81920 * 2), (81920 * 2, None, 200704)]
+        # this strategy is to create 2 spectra per detector tube
+        PIXELS_PER_EIGHTPACK = 512 * 8
+        # TOTAL_TUBES = (20 + 20 + 9) * 8
+        bank1_start = 0
+        bank2_start = 20 * PIXELS_PER_EIGHTPACK
+        bank5_start = (20 + 20) * PIXELS_PER_EIGHTPACK
+        bank5_stop = (20 + 20 + 9) * PIXELS_PER_EIGHTPACK
+        tube_grouping_plan = [(bank1_start, 256, bank2_start),
+                              (bank2_start, 256, bank5_start),
+                              (bank5_start, 256, bank5_stop)]
+
         focus_ws = align_data(diamond_runs=self.DIAMOND_FILES,
                               diff_cal_file_name=self.PREVIOUS_CALIBRATION,
                               output_dir=test_output_dir,
                               tube_grouping_plan=tube_grouping_plan)
-        assert focus_ws.getNumberHistograms() == 3
+        # TODO should be 2 * TOTAL_TUBES, f"{focus_ws.getNumberHistograms()} != {2 * TOTAL_TUBES}"
+        assert focus_ws.getNumberHistograms() == 686 # TODO
         units = focus_ws.getAxis(0).getUnit().unitID()
         assert units == 'dSpacing'
         for i in range(focus_ws.getNumberHistograms()):
             x = focus_ws.readX(i)
-            print(x[0], x[-1])
             assert np.alltrue(x >= 0.3), "d-spacing >= 0.3"
             assert np.alltrue(x < 1.5), "d-spacing < 1.5"
 
 
-class PositionCalibrationTest(): # systemtesting.MantidSystemTest):
+class PositionCalibrationTest(systemtesting.MantidSystemTest):
     PREVIOUS_CALIBRATION = "VULCAN_192245_Calibration_CC.h5"  # TODO not on external data server
     DIAMOND_FILES = [VULCAN_192226_RAW]
 
