@@ -194,7 +194,7 @@ def cross_correlate_calibrate2(ws_name: str,
         OffsetsWorkspace name, MaskWorkspace name
     """
     # Process inputs: reference of input workspace
-    diamond_event_ws = retrieve_workspace(ws_name, True)
+    diamond_event_ws = __retrieve_workspace(ws_name)
     if peak_fit_time == 1:
         fit_twice = False
     else:
@@ -419,8 +419,7 @@ def _merge_partial_offset_mask_workspaces(offset_ws_name: str,
     return offset_ws_name, mask_ws_name
 
 
-def retrieve_workspace(ws_name: str,
-                       raise_if_not_exist: bool = False):
+def __retrieve_workspace(ws_name: str):
     """
     Retrieve workspace from AnalysisDataService
     Purpose:
@@ -433,20 +432,13 @@ def retrieve_workspace(ws_name: str,
     :param raise_if_not_exist:
     :return: workspace instance (1)
     """
-    assert isinstance(ws_name, str), 'Input ws_name %s is not of type string, but of type %s.' % (str(ws_name),
-                                                                                                  str(type(
-                                                                                                      ws_name)))
-
-    if mtd.doesExist(ws_name) is False:
-        if raise_if_not_exist:
-            raise RuntimeError('ADS does not exist workspace named as {0}.'.format(ws_name))
-        else:
-            return None
-
-    return mtd.retrieve(ws_name)
+    if mtd.doesExist(str(ws_name)) is False:
+        raise RuntimeError(f'ADS does not exist workspace named as "{ws_name}"')
+    else:
+        return mtd.retrieve(str(ws_name))
 
 
-def copy_bank_wise_offset_values(target_calib_ws, ref_calib_ws, bank_name):
+def __copy_bank_wise_offset_values(target_calib_ws, ref_calib_ws, bank_name):
     """Copy over offset values from reference calibration by bank
     Parameters
     ----------
@@ -465,9 +457,9 @@ def copy_bank_wise_offset_values(target_calib_ws, ref_calib_ws, bank_name):
 
     # Get the workspaces handlers
     if isinstance(target_calib_ws, str):
-        target_calib_ws = retrieve_workspace(target_calib_ws, True)
+        target_calib_ws = __retrieve_workspace(target_calib_ws)
     if isinstance(ref_calib_ws, str):
-        ref_calib_ws = retrieve_workspace(ref_calib_ws, True)
+        ref_calib_ws = __retrieve_workspace(ref_calib_ws)
 
     # Copy over values
     num_cols = target_calib_ws.columnCount()
@@ -476,7 +468,7 @@ def copy_bank_wise_offset_values(target_calib_ws, ref_calib_ws, bank_name):
             target_calib_ws.setCell(row_index, col_index, ref_calib_ws.cell(row_index, col_index))
 
 
-def copy_bank_wise_masks(target_mask_ws, ref_mask_ws: Union[str, Any], bank_name: str):
+def __copy_bank_wise_masks(target_mask_ws, ref_mask_ws: Union[str, Any], bank_name: str):
     """Copy over masks from reference mask workspace to target workspace for a specific bank
     Parameters
     ----------
@@ -494,11 +486,11 @@ def copy_bank_wise_masks(target_mask_ws, ref_mask_ws: Union[str, Any], bank_name
 
     # apply
     if isinstance(target_mask_ws, str):
-        mask_ws = retrieve_workspace(target_mask_ws, True)
+        mask_ws = __retrieve_workspace(target_mask_ws)
     else:
         mask_ws = target_mask_ws
     if isinstance(ref_mask_ws, str):
-        ref_mask_ws = retrieve_workspace(ref_mask_ws, True)
+        ref_mask_ws = __retrieve_workspace(ref_mask_ws)
 
     # static
     num_masked = 0
@@ -593,9 +585,9 @@ def merge_detector_calibration(offset_ws_dict: Dict,
 
         print('[INFO] Applying {}:{} to {}'.format(ref_calib_ws, bank_name, calib_ws_name))
         if ref_calib_ws:
-            copy_bank_wise_offset_values(calib_ws_name, ref_calib_ws, bank_name)
+            __copy_bank_wise_offset_values(calib_ws_name, ref_calib_ws, bank_name)
         if ref_mask_ws:
-            copy_bank_wise_masks(out_mask_ws_name, ref_mask_ws, bank_name)
+            __copy_bank_wise_masks(out_mask_ws_name, ref_mask_ws, bank_name)
             # Apply masks from mask bit to instrument (this is a pure Mantid issue)
             apply_masks(out_mask_ws_name)
     # END-FOR

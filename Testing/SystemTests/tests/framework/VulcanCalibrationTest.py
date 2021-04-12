@@ -108,6 +108,7 @@ class AlignDataSubBankTest(systemtesting.MantidSystemTest):
                               output_dir=test_output_dir,
                               tube_grouping_plan=tube_grouping_plan)
         # TODO should be 2 * TOTAL_TUBES, f"{focus_ws.getNumberHistograms()} != {2 * TOTAL_TUBES}"
+        # there is a bug in AlignAndFocusPowderFromFiles
         assert focus_ws.getNumberHistograms() == 686 # TODO
         units = focus_ws.getAxis(0).getUnit().unitID()
         assert units == 'dSpacing'
