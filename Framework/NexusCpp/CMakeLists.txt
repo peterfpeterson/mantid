@@ -1,19 +1,10 @@
 include(GenerateExportHeader)
 
-set(SRC_FILES
-    src/napi.cpp
-    src/napi4.cpp
-    src/napi5.cpp
-    src/NeXusException.cpp
-    src/NeXusFile.cpp
-    src/nxstack.cpp
-    src/stptok.cpp
-)
+set(SRC_FILES src/napi.cpp src/napi5.cpp src/NeXusException.cpp src/NeXusFile.cpp src/nxstack.cpp src/stptok.cpp)
 
 set(INC_FILES
     inc/MantidNexusCpp/NeXusFile_fwd.h
     inc/MantidNexusCpp/napi.h
-    inc/MantidNexusCpp/napi4.h
     inc/MantidNexusCpp/napi5.h
     inc/MantidNexusCpp/napiconfig.h
     inc/MantidNexusCpp/napi_internal.h
@@ -32,15 +23,10 @@ target_include_directories(
 )
 
 # Set the name of the generated library
-set_target_properties(
-  NexusCpp
-  PROPERTIES OUTPUT_NAME MantidNexusCpp
-             COMPILE_DEFINITIONS IN_MANTID_NEXUSCPP
-             WITH_HDF4 WITH_HDF5
-)
+set_target_properties(NexusCpp PROPERTIES OUTPUT_NAME MantidNexusCpp COMPILE_DEFINITIONS IN_MANTID_NEXUSCPP)
 # H5_BUILT_AS_DYNAMIC_LIB required https://github.com/conda-forge/hdf5-feedstock/issues/58
 target_compile_definitions(NexusCpp PUBLIC -DH5_BUILT_AS_DYNAMIC_LIB)
-target_link_libraries(NexusCpp PUBLIC ${HDF4_DF_LIBRARY} ${HDF4_MFHDF_LIBRARY} ${HDF5_LIBRARIES})
+target_link_libraries(NexusCpp PUBLIC ${HDF5_LIBRARIES})
 
 if(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
   set_target_properties(NexusCpp PROPERTIES INSTALL_RPATH "@loader_path/../MacOS;@loader_path/../Frameworks")
@@ -75,22 +61,6 @@ add_executable(napi_test_cpp-hdf5 EXCLUDE_FROM_ALL test/napi_test_cpp.cpp test/n
 target_link_libraries(napi_test_cpp-hdf5 NexusCpp)
 add_test(NAME "${TEST_PREFIX}-Cpp-HDF5-test" COMMAND napi_test_cpp-hdf5)
 
-# #### HDF4
-add_executable(napi_test_hdf4 EXCLUDE_FROM_ALL test/napi_test.cpp test/napi_test_util.cpp test/napi_test_util.h)
-target_link_libraries(napi_test_hdf4 NexusCpp)
-add_test(NAME "${TEST_PREFIX}-C-HDF4-test" COMMAND napi_test_hdf4)
-
-add_executable(
-  napi_attra_test_hdf4 EXCLUDE_FROM_ALL test/napi_attra_test.cpp test/napi_test_util.cpp test/napi_test_util.h
-)
-target_link_libraries(napi_attra_test_hdf4 NexusCpp)
-add_test(NAME "${TEST_PREFIX}-C-HDF4-attra-test" COMMAND napi_attra_test_hdf4)
-set_tests_properties("${TEST_PREFIX}-C-HDF4-attra-test" PROPERTIES WILL_FAIL TRUE)
-
-add_executable(napi_test_cpp-hdf4 EXCLUDE_FROM_ALL test/napi_test_cpp.cpp test/napi_test_util.cpp test/napi_test_util.h)
-target_link_libraries(napi_test_cpp-hdf4 NexusCpp)
-add_test(NAME "${TEST_PREFIX}-Cpp-HDF4-test" COMMAND napi_test_cpp-hdf4)
-
 # #### test for unlimited dimensions
 add_executable(napi_test_nxunlimited EXCLUDE_FROM_ALL test/test_nxunlimited.cpp)
 target_link_libraries(napi_test_nxunlimited NexusCpp)
@@ -116,9 +86,6 @@ add_custom_target(
   DEPENDS napi_test_hdf5
           napi_attra_test_hdf5
           napi_test_cpp-hdf5
-          napi_test_hdf4
-          napi_attra_test_hdf4
-          napi_test_cpp-hdf4
           napi_test_nxunlimited
           napi_leak_test1
           napi_leak_test2
