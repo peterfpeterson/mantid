@@ -94,7 +94,7 @@ public:
     char c1_array[5][4] = {
         {'a', 'b', 'c', 'd'}, {'e', 'f', 'g', 'h'}, {'i', 'j', 'k', 'l'}, {'m', 'n', 'o', 'p'}, {'q', 'r', 's', 't'}};
     file.makeData("c1_data", NXnumtype::CHAR, array_dims, true);
-    file.putData(&c1_array);
+    file.putData(&(c1_array[0][0]));
     file.closeData();
 
     // 1d uint8 array
@@ -405,7 +405,7 @@ public:
             DimVector dims({(int64_t)i2_array.size()});
             fileid.makeData(oss3, NXnumtype::INT16, dims);
             fileid.openData(oss3);
-            fileid.putData(&i2_array);
+            fileid.putData(i2_array);
             fileid.closeData();
           }
           fileid.closeGroup();
@@ -463,7 +463,7 @@ public:
             std::string oss3(strmakef("i2_data_%d", iData));
             fileid.makeCompData(oss3, NXnumtype::INT16, array_dims, NXcompression::LZW, array_dims);
             fileid.openData(oss3);
-            fileid.putData(&aiBinaryData);
+            fileid.putData(&(aiBinaryData[0]));
             fileid.closeData();
           }
           fileid.closeGroup();
@@ -519,7 +519,7 @@ private:
     // write
     fileid.makeData(dataname, getType<T>(), DimVector({N, M}));
     fileid.openData(dataname);
-    fileid.putData(data);
+    fileid.putData(&(data[0][0]));
     fileid.closeData();
 
     // read
@@ -551,7 +551,7 @@ private:
     int const Ncheck(5); // can't use variable-length arrays, just check this many
     T output[Ncheck];
     fileid.openData(dataname);
-    fileid.getSlab(&output, start, size);
+    fileid.getSlab(&(output[0]), start, size);
 
     // compare
     for (int i = 0; i < Ncheck; i++) {
@@ -578,7 +578,7 @@ private:
     // read, compare, row-by-row
     for (size_t i = 1; i <= N; i++) {
       size = {(dimsize_t)i, (dimsize_t)M};
-      fileid.getSlab(&output, start, size);
+      fileid.getSlab(&(output[0][0]), start, size);
       for (size_t j = 0; j < M; j++) {
         TS_ASSERT_EQUALS(data[0][j], output[0][j]);
       }
@@ -763,7 +763,7 @@ public:
     string const somedata("this is some data");
     fileid.makeData("some_data", NXnumtype::CHAR, DimVector({(dimsize_t)somedata.size()}));
     fileid.openData("some_data");
-    fileid.putData(&somedata);
+    fileid.putData(somedata.c_str());
     NXlink datalink = fileid.getDataID();
     fileid.closeData();
     fileid.flush();
