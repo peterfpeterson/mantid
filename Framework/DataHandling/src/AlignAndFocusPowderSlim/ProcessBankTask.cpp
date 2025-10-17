@@ -144,8 +144,34 @@ void ProcessBankTask::operator()(const tbb::blocked_range<size_t> &range) const 
             m_loader.loadData(tof_SDS, event_time_of_flight, offsets, slabsizes);
           });
 
+      constexpr float INVALID_TOF = -1.0f; // nobody should bin less than zero values
+      const auto tof_max = spectrum.readX().back();
+      tbb::parallel_for(
+          tbb::blocked_range<size_t>(0, event_time_of_flight->size(), m_grainsize_event),
+          [&event_detid, &calibration, &event_time_of_flight, tof_max](const tbb::blocked_range<size_t> &range) {
+            std::span<uint32_t> detids(event_detid->data() + range.begin(), range.size());
+            std::span<float> tofs(event_time_of_flight->data() + range.begin(), range.size());
+
+            std::transform(tofs.begin(), tofs.end(), detids.begin(), tofs.begin(),
+                           [&calibration, tof_max](const float tof, const uint32_t detid) {
+                             const auto &calib_factor = calibration->value(detid);
+                             if (calib_factor < IGNORE_PIXEL) {
+                               const double calibrated_tof = static_cast<double>(tof) * calib_factor;
+                               if (calibrated_tof < tof_max) {
+                                 return static_cast<float>(calibrated_tof);
+                               } else {
+                                 return INVALID_TOF; // mark as invalid
+                               }
+                             } else {
+                               return INVALID_TOF; // mark as invalid
+                             }
+                           });
+          });
+
+      // tbb::parallel_sort(event_time_of_flight->begin(), event_time_of_flight->end());
+
       // Create a local task for this thread
-      ProcessEventsTask task(event_detid.get(), event_time_of_flight.get(), calibration.get(), &spectrum.readX());
+      ProcessEventsTask task(event_time_of_flight.get(), &spectrum.readX());
 
       // Non-blocking processing of the events
       const tbb::blocked_range<size_t> range_info(0, event_time_of_flight->size(), m_grainsize_event);
