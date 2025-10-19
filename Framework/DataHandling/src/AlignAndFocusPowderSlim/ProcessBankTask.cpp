@@ -168,7 +168,7 @@ void ProcessBankTask::operator()(const tbb::blocked_range<size_t> &range) const 
                            });
           });
 
-      // tbb::parallel_sort(event_time_of_flight->begin(), event_time_of_flight->end());
+      tbb::parallel_sort(event_time_of_flight->begin(), event_time_of_flight->end());
 
       // Create a local task for this thread
       ProcessEventsTask task(event_time_of_flight.get(), &spectrum.readX());

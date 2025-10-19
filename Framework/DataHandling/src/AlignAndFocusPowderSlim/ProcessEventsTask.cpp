@@ -23,6 +23,23 @@ void ProcessEventsTask::operator()(const tbb::blocked_range<size_t> &range) {
   const auto &tof_min = m_binedges->front();
 
   std::span<const float> tofs(m_tofs->begin() + range.begin(), range.size());
+
+  // modeled from EventList::findFirstEvent
+  auto tof_iter = std::find_if_not(tofs.begin(), tofs.end(),
+                                   [tof_min](const float tof) { return tof < static_cast<float>(tof_min); });
+  const auto tof_iter_end = tofs.end();
+
+  // go through all the events - modeled from EventList::generateCountsHistogram
+  for (auto itx = binedges_cbegin; tof_iter != tof_iter_end; ++tof_iter) {
+    const auto tof = static_cast<double>(*tof_iter);
+    itx = std::find_if(itx, binedges_cend, [tof](const double edge) { return !(tof < edge); });
+    if (itx == binedges_cend) {
+      break; // all done
+    }
+    const auto bin = static_cast<size_t>(std::max(std::distance(binedges_cbegin, itx) - 1, std::ptrdiff_t{0}));
+    y_temp[bin]++;
+  }
+
   for (const auto tof : tofs) {
     const double tof_d = static_cast<double>(tof);
     if (!(tof_d < tof_min)) { // check against max done in transformation
