@@ -83,7 +83,7 @@ mamba = "<2"
 rattler-index = "*"
 
 [dependencies]
-cmake = ">=3.21.0"
+cmake = ">=4.2,<5"
 ccache = ">=4.11.3,<5"
 cppcheck = "==2.18.1"
 eigen = "3.4.*"
