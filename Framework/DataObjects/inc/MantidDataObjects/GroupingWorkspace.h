@@ -29,7 +29,14 @@ public:
   GroupingWorkspace(const Geometry::Instrument_const_sptr &inst);
   GroupingWorkspace() = default;
   GroupingWorkspace(size_t numvectors);
-  GroupingWorkspace(const std::vector<detid_t> &detids);
+  /**
+   * Constructor, building from a list of detector IDs.
+   * Creates one spectrum per detector ID and associates each spectrum with its
+   * corresponding detector ID.
+   * @param detids :: vector of detector IDs, one per spectrum
+   */
+  inline GroupingWorkspace(const std::vector<detid_t> &detids) : SpecialWorkspace2D(detids) {}
+
   GroupingWorkspace &operator=(const GroupingWorkspace &) = delete;
 
   /// Returns a clone of the workspace

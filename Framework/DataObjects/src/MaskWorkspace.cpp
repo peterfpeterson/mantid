@@ -67,8 +67,6 @@ MaskWorkspace::MaskWorkspace(const API::MatrixWorkspace_const_sptr &parent) : Sp
   this->clearMask();
 }
 
-MaskWorkspace::MaskWorkspace(const std::vector<detid_t> &detids) : SpecialWorkspace2D(detids) { this->clearMask(); }
-
 //--------------------------------------------------------------------------
 
 void MaskWorkspace::clearMask() {
