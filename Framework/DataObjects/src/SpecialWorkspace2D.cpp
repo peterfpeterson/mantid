@@ -59,11 +59,11 @@ SpecialWorkspace2D::SpecialWorkspace2D(const API::MatrixWorkspace_const_sptr &pa
 /**
  * Constructor, building from a list of detector IDs.
  * Creates one spectrum per detector ID and associates each spectrum with its
- * corresponding detector ID.
+ * corresponding detector ID. This does not set an instrument.
  * @param detids :: vector of detector IDs, one per spectrum
  */
 SpecialWorkspace2D::SpecialWorkspace2D(const std::vector<detid_t> &detids) {
-  this->init(detids.size(), 1, 1);
+  this->initialize(detids.size(), 1, 1);
   // set the detector ids
   for (size_t wi = 0; wi < detids.size(); ++wi) {
     this->getSpectrum(wi).setDetectorID(detids[wi]);
