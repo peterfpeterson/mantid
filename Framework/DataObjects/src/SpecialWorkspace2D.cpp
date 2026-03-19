@@ -63,7 +63,10 @@ SpecialWorkspace2D::SpecialWorkspace2D(const API::MatrixWorkspace_const_sptr &pa
  * @param detids :: vector of detector IDs, one per spectrum
  */
 SpecialWorkspace2D::SpecialWorkspace2D(const std::vector<detid_t> &detids) {
-  this->initialize(detids.size(), 1, 1);
+  if (detids.empty()) // skip the full initialize method
+    this->init(0, 1, 1);
+  else
+    this->initialize(detids.size(), 1, 1);
   // set the detector ids
   for (size_t wi = 0; wi < detids.size(); ++wi) {
     this->getSpectrum(wi).setDetectorID(detids[wi]);
