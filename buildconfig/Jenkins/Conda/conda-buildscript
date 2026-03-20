@@ -131,7 +131,16 @@ git clean -d -x --force --exclude=".Xauthority-*" $git_clean_excludes_extra
 # install pixi if not already installed
 install_pixi
 
-pixi run --frozen python -m pip uninstall -y mantid mantidqt MantidWorkbench mantidqtinterfaces instrumentview
+# remove all of the editable installs that cmake did in previous build
+for pkg in mantid mantidqt MantidWorkbench mantidqtinterfaces instrumentview ; do
+    # regexp is anchored for beginning of line to any whitespace to reduce false positives
+    if [ $(pixi run --frozen python -m pip list | grep -c "^${pkg}\s") -eq 1 ]; then
+	echo "removing ${pkg}"
+	pixi run --frozen python -m pip uninstall -y "${pkg}"
+    else
+	echo "${pkg} is not installed"
+    fi
+done
 
 # Check whether this is an incremental build that only changes rst files
 if [ -d $BUILD_DIR ]; then
