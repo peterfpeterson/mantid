@@ -225,6 +225,11 @@ std::map<std::string, std::string> Rebin::validateInputs() {
  *
  */
 void Rebin::init() {
+  bool something = true;
+  if (something)
+    int x = 1;
+  int y = 2;
+
   declareProperty(std::make_unique<WorkspaceProperty<>>(PropertyNames::INPUT_WKSP, "", Direction::Input),
                   "Workspace containing the input data");
   declareProperty(std::make_unique<WorkspaceProperty<>>(PropertyNames::OUTPUT_WKSP, "", Direction::Output),
