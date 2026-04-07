@@ -63,9 +63,7 @@
         "conda"
       ],
       "cacheVariables": {
-        "CMAKE_DISABLE_PRECOMPILE_HEADERS": "ON",
-        "CMAKE_C_FLAGS": "-ffile-prefix-map=${sourceDir}/=",
-        "CMAKE_CXX_FLAGS": "-ffile-prefix-map=${sourceDir}/="
+        "CMAKE_DISABLE_PRECOMPILE_HEADERS": "ON"
       }
     },
     {
@@ -179,8 +177,6 @@
         "conda"
       ],
       "cacheVariables": {
-        "CMAKE_C_FLAGS": "-ffile-prefix-map=${sourceDir}/=",
-        "CMAKE_CXX_FLAGS": "-ffile-prefix-map=${sourceDir}/=",
         "USE_SANITIZER": "Address"
       }
     },
@@ -193,8 +189,6 @@
         "conda"
       ],
       "cacheVariables": {
-        "CMAKE_C_FLAGS": "-ffile-prefix-map=${sourceDir}/=",
-        "CMAKE_CXX_FLAGS": "-ffile-prefix-map=${sourceDir}/=",
         "USE_SANITIZER": "Undefined"
       }
     },
@@ -207,8 +201,6 @@
         "conda"
       ],
       "cacheVariables": {
-        "CMAKE_C_FLAGS": "-ffile-prefix-map=${sourceDir}/=",
-        "CMAKE_CXX_FLAGS": "-ffile-prefix-map=${sourceDir}/=",
         "USE_SANITIZER": "Thread"
       }
     },
