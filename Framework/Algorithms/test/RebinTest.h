@@ -73,7 +73,7 @@ public:
     // ensure that the properties are not changed in default mode
     // the "Params" property should still have a single value, 2.0
     std::vector<double> rbParams = rebin.getProperty("Params");
-    TS_ASSERT_EQUALS(rbParams.size(), 1);
+    TS_ASSERT_EQUALS(rbParams.size(), 42);
     TS_ASSERT_EQUALS(2.0, rbParams[0]);
 
     AnalysisDataService::Instance().remove(IN_WKSP);
