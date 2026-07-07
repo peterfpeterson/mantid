@@ -150,14 +150,16 @@ size_t ConvToMDEventsWS::initialize(const MDWSDescription &WSD, std::shared_ptr<
         m_GonioIndex.push_back(n);
       }
     }
-
     const auto &dimNames = WSD.getDimNames();
     for (auto it = dimNames.cbegin() + m_NMatrixDimensions; it != dimNames.cend(); ++it) {
       m_Logs.push_back(
           std::unique_ptr<Kernel::TimeSeriesProperty<double>>(run.getTimeSeriesProperty<double>(*it)->clone()));
       m_extraDimBounds.push_back(m_QConverter->getDimBounds(it - dimNames.cbegin()));
     }
-    m_tmpRot = Kernel::DblMatrix(3, 3);
+    if (!m_GonioIndex.empty()) {
+      m_tmpRot = Kernel::DblMatrix(3, 3);
+      m_QConverter->setInvertRot(true);
+    }
   }
 
   return numSpec;
@@ -204,8 +206,12 @@ void ConvToMDEventsWS::appendEventsFromInputWS(API::Progress *pProgress, const A
     // tp constructor)
     pProgress->resetNumSteps(m_NSpectra, 0, 1);
   }
-  Kernel::ThreadPool tp(ts, nThreads, new API::Progress(*pProgress));
+  Kernel::ThreadPool tp(ts, nThreads, new API::Progress());
   //<<<--  Thread control stuff
+
+  // for continuous rotation, algorithm takes much longer. We increase report rate for QOL usage.
+  const bool frequentReport = !m_GonioIndex.empty();
+  const int div = 500;
 
   size_t eventsAdded = 0;
   for (size_t wi = 0; wi < m_NSpectra; wi++) {
@@ -213,6 +219,11 @@ void ConvToMDEventsWS::appendEventsFromInputWS(API::Progress *pProgress, const A
     size_t nConverted = conversionChunk(wi);
     eventsAdded += nConverted;
     nEventsInWS += nConverted;
+
+    if (frequentReport && wi % div == 0) {
+      pProgress->report(static_cast<int>(wi));
+    }
+
     // Keep a running total of how many events we've added
     if (bc->shouldSplitBoxes(nEventsInWS, eventsAdded, lastNumBoxes)) {
       if (runMultithreaded) {
@@ -228,7 +239,7 @@ void ConvToMDEventsWS::appendEventsFromInputWS(API::Progress *pProgress, const A
       // Count the new # of boxes.
       lastNumBoxes = m_OutWSWrapper->pWorkspace()->getBoxController()->getTotalNumMDBoxes();
       eventsAdded = 0;
-      pProgress->report(wi);
+      pProgress->report(static_cast<int>(wi));
     }
   }
   // Do a final splitting of everything
