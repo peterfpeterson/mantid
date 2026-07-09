@@ -180,6 +180,7 @@ TMDE(MDGridBox)::MDGridBox(const MDGridBox<MDE, nd> &other, Mantid::API::BoxCont
     split[d] = other.split[d];
     splitCumul[d] = other.splitCumul[d];
     m_SubBoxSize[d] = other.m_SubBoxSize[d];
+    m_SubBoxSizeInv[d] = other.m_SubBoxSizeInv[d];
   }
   // Copy all the boxes
   m_Children.clear();
@@ -229,6 +230,7 @@ TMDE(size_t MDGridBox)::computeSizesFromSplit() {
     tot *= split[d];
     // Length of the side of a box in this dimension
     m_SubBoxSize[d] = static_cast<double>(this->extents[d].getSize()) / static_cast<double>(split[d]);
+    m_SubBoxSizeInv[d] = 1.0 / m_SubBoxSize[d];
     // Accumulate the squared diagonal length.
     diagSum += m_SubBoxSize[d] * m_SubBoxSize[d];
   }
@@ -1727,8 +1729,14 @@ TMDE(size_t MDGridBox)::calculateChildIndex(const MDE &event) const {
   size_t cindex(0);
   for (size_t d = 0; d < nd; d++) {
     // Accumulate the index
-    auto offset = event.getCenter(d) - this->extents[d].getMin();
-    cindex += static_cast<int>(offset / (m_SubBoxSize[d])) * splitCumul[d];
+    const auto coordinate = event.getCenter(d);
+    const auto offset = coordinate - this->extents[d].getMin();
+    const int splitD = static_cast<int>(split[d]);
+    // clamp to splitD-1: FP rounding can place an in-box coordinate one slot past the last valid child
+    auto childIndex = static_cast<int>(offset * m_SubBoxSizeInv[d]);
+    if (childIndex == splitD && coordinate <= this->extents[d].getMax())
+      childIndex = splitD - 1;
+    cindex += childIndex * splitCumul[d];
   }
   return cindex;
 }
