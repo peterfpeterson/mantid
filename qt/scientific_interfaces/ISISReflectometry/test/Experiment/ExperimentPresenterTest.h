@@ -603,6 +603,12 @@ public:
     presenter.notifySettingsChanged();
   }
 
+  void testThrowsWhenMainPresenterHasNotBeenAccepted() {
+    auto presenter = makePresenter(makeDefaults(), makeEmptyExperiment(), false);
+    TS_ASSERT_THROWS_EQUALS(presenter.notifyReductionResumed(), std::runtime_error const &e, std::string(e.what()),
+                            "ExperimentPresenter does not have a main presenter.");
+  }
+
   void testChangingLookupRowNotifiesMainPresenter() {
     auto presenter = makePresenter();
     EXPECT_CALL(m_mainPresenter, notifySettingsChanged()).Times(AtLeast(1));
@@ -988,12 +994,14 @@ private:
 
   ExperimentPresenter makePresenter(
       std::unique_ptr<IExperimentOptionDefaults> defaultOptions = std::make_unique<MockExperimentOptionDefaults>(),
-      Experiment experiment = makeEmptyExperiment()) {
+      Experiment experiment = makeEmptyExperiment(), bool const acceptMainPresenter = true) {
     // The presenter gets values from the view on construction so the view must
     // return something sensible
     auto presenter = ExperimentPresenter(&m_view, std::move(experiment), m_thetaTolerance, &m_fileHandler,
                                          std::move(defaultOptions));
-    presenter.acceptMainPresenter(&m_mainPresenter);
+    if (acceptMainPresenter) {
+      presenter.acceptMainPresenter(&m_mainPresenter);
+    }
     return presenter;
   }
 
