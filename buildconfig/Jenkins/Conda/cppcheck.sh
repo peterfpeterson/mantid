@@ -51,8 +51,8 @@ find -name cppcheck.xml -delete
 
 pixi run --frozen cmake --preset=cppcheck-ci -DCPPCHECK_NUM_THREADS=$BUILD_THREADS ..
 
-# Run cppcheck
-pixi run --frozen cmake --build . --target cppcheck
+# Run cppcheck. Use the 'cppcheck-xml' target which writes the cppcheck.xml report consumed below.
+pixi run --frozen cmake --build . --target cppcheck-xml
 
 # Generate HTML report
 pixi run --frozen cppcheck-htmlreport --file=cppcheck.xml --title=Embedded --report-dir=cppcheck-report
