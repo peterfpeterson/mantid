@@ -6,9 +6,29 @@
 // SPDX - License - Identifier: GPL - 3.0 +
 #include "MantidMDAlgorithms/ConvToMDEventsWS.h"
 
+#include "MantidAPI/Run.h"
 #include "MantidMDAlgorithms/UnitsConversionHelper.h"
 
 namespace Mantid::MDAlgorithms {
+
+// This method sets a generic variable set as an extra dimensions from the log value at the event time.
+bool ConvToMDEventsWS::setGenericVariableFromLogs(const Mantid::Types::Core::DateAndTime &pT,
+                                                  std::vector<coord_t> &localCoord) const {
+  if (!m_useLogTimes || m_Logs.size() <= m_GonioIndex.size()) {
+    return true;
+  }
+  int ic(0);
+  for (size_t idxLog = m_GonioIndex.size(); idxLog < m_Logs.size(); idxLog++) {
+    auto logval = m_Logs[idxLog]->getSingleValue(pT);
+    if (std::isnan(logval) || logval < m_extraDimBounds[ic].first || logval >= m_extraDimBounds[ic].second) {
+      return false;
+    }
+    localCoord[m_NMatrixDimensions + ic] = static_cast<coord_t>(logval);
+    ic++;
+  }
+  return true;
+}
+
 /**function converts particular list of events of type T into MD workspace and
  * adds these events to the workspace itself  */
 template <class T> size_t ConvToMDEventsWS::convertEventList(size_t workspaceIndex) {
@@ -50,12 +70,15 @@ template <class T> size_t ConvToMDEventsWS::convertEventList(size_t workspaceInd
   typename std::vector<T> const *events_ptr;
   getEventsFrom(el, events_ptr);
   const typename std::vector<T> &events = *events_ptr;
-
   // Iterators to start/end
   for (auto it = events.cbegin(); it != events.cend(); it++) {
     double val = localUnitConv.convertUnits(it->tof());
     double signal = it->weight();
     double errorSq = it->errorSquared();
+    if (!setGoniometersFromLogs(it))
+      continue; // skip if log value is NaN
+    if (!setGenericVariableFromLogs(it->pulseTime(), locCoord))
+      continue; // skip if log value is NaN or out of bounds
     if (!m_QConverter->calcMatrixCoord(val, locCoord, signal, errorSq))
       continue; // skip ND outside the range
 
@@ -91,15 +114,17 @@ size_t ConvToMDEventsWS::conversionChunk(size_t workspaceIndex) {
 
 /** method sets up all internal variables necessary to convert from Event
 Workspace to MDEvent workspace
-@param WSD         -- the class describing the target MD workspace, sorurce
+@param WSD         -- the class describing the target MD workspace, source
 Event workspace and the transformations, necessary to perform on these
 workspaces
 @param inWSWrapper -- the class wrapping the target MD workspace
 @param ignoreZeros  -- if zero value signals should be rejected
+@param useLogTimes -- if log values at event pulse time should be used
+for computing Goniometer matrix or additional dimensions
 */
 size_t ConvToMDEventsWS::initialize(const MDWSDescription &WSD, std::shared_ptr<MDEventWSWrapper> inWSWrapper,
-                                    bool ignoreZeros) {
-  size_t numSpec = ConvToMDBase::initialize(WSD, inWSWrapper, ignoreZeros);
+                                    bool ignoreZeros, bool useLogTimes) {
+  size_t numSpec = ConvToMDBase::initialize(WSD, std::move(inWSWrapper), ignoreZeros, useLogTimes);
 
   m_EventWS = std::dynamic_pointer_cast<const DataObjects::EventWorkspace>(m_InWS2D);
   if (!m_EventWS)
@@ -107,6 +132,36 @@ size_t ConvToMDEventsWS::initialize(const MDWSDescription &WSD, std::shared_ptr<
 
   // Record any special coordinate system known to the description.
   m_coordinateSystem = WSD.getCoordinateSystem();
+
+  // Look up required logs is using log times
+  if (m_useLogTimes) {
+    // Saves the Q-cartesian transformation
+    m_Wtransf = WSD.m_Wtransf;
+    m_NMatrixDimensions = m_QConverter->getNMatrixDimensions(WSD.getEMode(), nullptr);
+
+    // Log values for Gonios
+    const Mantid::API::Run &run = WSD.getInWS()->run();
+    m_Goniometer = run.getGoniometer();
+    for (size_t n = 0; n < m_Goniometer.getNumberAxes(); n++) {
+      Mantid::Geometry::GoniometerAxis ax = m_Goniometer.getAxis(n);
+      if (run.hasProperty(ax.name)) {
+        m_Logs.push_back(
+            std::unique_ptr<Kernel::TimeSeriesProperty<double>>(run.getTimeSeriesProperty<double>(ax.name)->clone()));
+        m_GonioIndex.push_back(n);
+      }
+    }
+    const auto &dimNames = WSD.getDimNames();
+    for (auto it = dimNames.cbegin() + m_NMatrixDimensions; it != dimNames.cend(); ++it) {
+      m_Logs.push_back(
+          std::unique_ptr<Kernel::TimeSeriesProperty<double>>(run.getTimeSeriesProperty<double>(*it)->clone()));
+      m_extraDimBounds.push_back(m_QConverter->getDimBounds(it - dimNames.cbegin()));
+    }
+    if (!m_GonioIndex.empty()) {
+      m_tmpRot = Kernel::DblMatrix(3, 3);
+      m_QConverter->setInvertRot(true);
+    }
+  }
+
   return numSpec;
 }
 
@@ -151,8 +206,12 @@ void ConvToMDEventsWS::appendEventsFromInputWS(API::Progress *pProgress, const A
     // tp constructor)
     pProgress->resetNumSteps(m_NSpectra, 0, 1);
   }
-  Kernel::ThreadPool tp(ts, nThreads, new API::Progress(*pProgress));
+  Kernel::ThreadPool tp(ts, nThreads, new API::Progress());
   //<<<--  Thread control stuff
+
+  // for continuous rotation, algorithm takes much longer. We increase report rate for QOL usage.
+  const bool frequentReport = !m_GonioIndex.empty();
+  const int div = 500;
 
   size_t eventsAdded = 0;
   for (size_t wi = 0; wi < m_NSpectra; wi++) {
@@ -160,6 +219,11 @@ void ConvToMDEventsWS::appendEventsFromInputWS(API::Progress *pProgress, const A
     size_t nConverted = conversionChunk(wi);
     eventsAdded += nConverted;
     nEventsInWS += nConverted;
+
+    if (frequentReport && wi % div == 0) {
+      pProgress->report(static_cast<int>(wi));
+    }
+
     // Keep a running total of how many events we've added
     if (bc->shouldSplitBoxes(nEventsInWS, eventsAdded, lastNumBoxes)) {
       if (runMultithreaded) {
@@ -175,7 +239,7 @@ void ConvToMDEventsWS::appendEventsFromInputWS(API::Progress *pProgress, const A
       // Count the new # of boxes.
       lastNumBoxes = m_OutWSWrapper->pWorkspace()->getBoxController()->getTotalNumMDBoxes();
       eventsAdded = 0;
-      pProgress->report(wi);
+      pProgress->report(static_cast<int>(wi));
     }
   }
   // Do a final splitting of everything

@@ -5,6 +5,9 @@
 //   Institut Laue - Langevin & CSNS, Institute of High Energy Physics, CAS
 // SPDX - License - Identifier: GPL - 3.0 +
 #include "MantidGeometry/Instrument/ComponentInfo.h"
+#include "MantidBeamline/ComponentType.h"
+#include "MantidGeometry/Instrument/SolidAngleParams.h"
+#include "MantidGeometry/Objects/CSGObject.h"
 #include "MantidGeometry/Objects/IObject.h"
 #include "MantidKernel/Quat.h"
 #include "MantidKernel/V3D.h"
@@ -14,10 +17,14 @@
 
 #include <boost/python/class.hpp>
 #include <boost/python/copy_const_reference.hpp>
+#include <boost/python/dict.hpp>
+#include <boost/python/enum.hpp>
 #include <boost/python/reference_existing_object.hpp>
 #include <boost/python/return_value_policy.hpp>
 
+using Mantid::Beamline::ComponentType;
 using Mantid::Geometry::ComponentInfo;
+using Mantid::Geometry::SolidAngleParams;
 using Mantid::Kernel::Quat;
 using Mantid::Kernel::V3D;
 using Mantid::PythonInterface::ComponentInfoPythonIterator;
@@ -29,6 +36,25 @@ namespace {
 ComponentInfoPythonIterator make_pyiterator(ComponentInfo &componentInfo) {
   return ComponentInfoPythonIterator(componentInfo);
 }
+
+// Accept a bare observer position so this reads as a drop-in for the legacy
+// IDetector::solidAngle(observer), constructing SolidAngleParams internally.
+double solidAngle(const ComponentInfo &self, const size_t index, const V3D &observer) {
+  return self.solidAngle(index, SolidAngleParams(observer));
+}
+
+dict shapeToComponentIndices(const ComponentInfo &componentInfo) {
+  dict result;
+  const auto shapeMap = componentInfo.shapeToComponentIndices();
+  for (const auto &shape : shapeMap) {
+    const auto csgObject = std::dynamic_pointer_cast<const Mantid::Geometry::CSGObject>(shape.first);
+    if (csgObject != nullptr) {
+      result[csgObject->getShapeXML()] = shape.second;
+    }
+  }
+  return result;
+}
+
 } // namespace
 
 // Function pointers to help resolve ambiguity
@@ -42,6 +68,16 @@ void (ComponentInfo::*setRotation)(const size_t, const Mantid::Kernel::Quat &) =
 
 // Export ComponentInfo
 void export_ComponentInfo() {
+  enum_<ComponentType>("ComponentType")
+      .value("Generic", ComponentType::Generic)
+      .value("Infinite", ComponentType::Infinite)
+      .value("Grid", ComponentType::Grid)
+      .value("Rectangular", ComponentType::Rectangular)
+      .value("Structured", ComponentType::Structured)
+      .value("Unstructured", ComponentType::Unstructured)
+      .value("Detector", ComponentType::Detector)
+      .value("OutlineComposite", ComponentType::OutlineComposite);
+
   class_<ComponentInfo, boost::noncopyable>("ComponentInfo", no_init)
 
       .def("__iter__", make_pyiterator)
@@ -137,6 +173,13 @@ void export_ComponentInfo() {
            return_value_policy<reference_existing_object>(),
            "Returns the shape of the component identified by 'index'.")
 
+      .def("solidAngle", &solidAngle, (arg("self"), arg("index"), arg("observer")),
+           "Returns the solid angle of the component identified by 'index' as "
+           "seen from the observer position.")
+
+      .def("componentType", &ComponentInfo::componentType, (arg("self"), arg("index")),
+           "Returns the ComponentType of the component identified by 'index'.")
+
       .def("indexOfAny", &ComponentInfo::indexOfAny, (arg("self"), arg("name")),
            "Returns the index of any component matching name. Raises "
            "ValueError if name not found")
@@ -146,5 +189,7 @@ void export_ComponentInfo() {
 
       .def("root", &ComponentInfo::root, arg("self"), "Returns the index of the root component")
       .def("getMemorySize", &ComponentInfo::getMemorySize, arg("self"),
-           "Return the memory footprint of the component info in bytes.");
+           "Return the memory footprint of the component info in bytes.")
+      .def("shapeToComponentIndices", &shapeToComponentIndices, arg("self"),
+           "Returns a mapping of shapes to the indices of components with that shape.");
 }

@@ -130,6 +130,7 @@ std::map<std::string, std::string> ConvertToMD::validateInputs() {
   std::vector<int> split_into = this->getProperty("SplitInto");
   const std::string filename = this->getProperty("Filename");
   const bool fileBackEnd = this->getProperty("FileBackEnd");
+  const bool useLogTimes = this->getProperty("UseLogTimes");
 
   if (fileBackEnd && filename.empty()) {
     result["Filename"] = "Filename must be given if FileBackEnd is required.";
@@ -139,7 +140,6 @@ std::map<std::string, std::string> ConvertToMD::validateInputs() {
     if (fileBackEnd)
       result["ConverterType"] += "No file back end implemented "
                                  "for indexed version of algorithm. ";
-
     if (topLevelSplittingChecked)
       result["ConverterType"] += "The usage of top level splitting is "
                                  "not possible for indexed version of algorithm. ";
@@ -176,6 +176,26 @@ std::map<std::string, std::string> ConvertToMD::validateInputs() {
     if (!msg.str().empty()) {
       result["MinValues"] = msg.str();
       result["MaxValues"] = msg.str();
+    }
+  }
+
+  if (useLogTimes) {
+    API::MatrixWorkspace_const_sptr inWS = this->getProperty("InputWorkspace");
+    const auto evWs = std::dynamic_pointer_cast<const DataObjects::EventWorkspace>(inWS);
+    if (!evWs) {
+      result["UseLogTimes"] = "UseLogTimes requires the input to be an EventWorkspace.";
+    } else {
+      const std::vector<std::string> otherDims = getProperty("OtherDimensions");
+      for (auto &nameDim : otherDims) {
+        if (!inWS->run().hasProperty(nameDim)) {
+          result["UseLogTimes"] = "Input workspace does not have " + nameDim + " property in its logs.";
+        } else {
+          if (Kernel::Property *pProperty = inWS->run().getProperty(nameDim);
+              !dynamic_cast<TimeSeriesProperty<double> *>(pProperty)) {
+            result["UseLogTimes"] = "Property " + nameDim + " is not a time series property, log times can't be used.";
+          }
+        }
+      }
     }
   }
 
@@ -264,14 +284,15 @@ void ConvertToMD::exec() {
   this->m_Convertor = AlgoSelector.convSelector(m_InWS2D, this->m_Convertor);
 
   bool ignoreZeros = getProperty("IgnoreZeroSignals");
+  bool useLogTimes = getProperty("UseLogTimes");
   // initiate conversion and estimate amount of job to do
-  size_t n_steps = this->m_Convertor->initialize(targWSDescr, m_OutWSWrapper, ignoreZeros);
+  size_t n_steps = this->m_Convertor->initialize(targWSDescr, m_OutWSWrapper, ignoreZeros, useLogTimes);
 
   // copy the metadata, necessary for resolution corrections
   copyMetaData(spws);
 
   // progress reporter
-  m_Progress.reset(new API::Progress(this, 0.0, 1.0, n_steps));
+  m_Progress = std::make_unique<Progress>(this, 0.0, 1.0, n_steps);
 
   g_log.information() << " conversion started\n";
   // DO THE JOB:
