@@ -84,20 +84,16 @@ void ProcessBankData::preCountAndReserveMem() {
   // ---- Pre-counting events per pixel ID ----
   DiagLap diagLap;
   // use the counts shared by this bank's tasks when they cover this range, rather than scanning all the events again
-  const bool haveSharedCounts = m_eventsPerDetId && m_min_detid >= m_eventsPerDetIdMin &&
-                                static_cast<size_t>(m_max_detid - m_eventsPerDetIdMin) < m_eventsPerDetId->size();
-  std::vector<size_t> localCounts;
-  if (!haveSharedCounts) {
-    localCounts.assign(m_max_detid - m_min_detid + 1, 0);
+  if (!eventsPerDetIdInRange()) {
+    m_localCounts.assign(m_max_detid - m_min_detid + 1, 0);
     for (size_t i = 0; i < numEvents; i++) {
       const auto thisId = static_cast<detid_t>((*event_detid)[i]);
       if (!(thisId < m_min_detid || thisId > m_max_detid)) // or allows for skipping out early
-        localCounts[thisId - m_min_detid]++;
+        m_localCounts[thisId - m_min_detid]++;
     }
   }
   // index 0 is m_min_detid
-  const size_t *counts =
-      haveSharedCounts ? m_eventsPerDetId->data() + (m_min_detid - m_eventsPerDetIdMin) : localCounts.data();
+  const size_t *counts = eventsPerDetIdInRange();
   std::tie(m_diagCountSeconds, m_diagCountFaults) = diagLap.lap();
 
   // Now we pre-allocate (reserve) the vectors of events in each pixel counted
@@ -163,8 +159,11 @@ void ProcessBankData::run() {
   // Will we need to compress?
   const bool compress = (alg->compressEvents);
 
-  // Which detector IDs were touched?
-  std::vector<bool> usedDetIds(m_max_detid - m_min_detid + 1, false);
+  // Which detector IDs were touched? The pre-count already knows which detector IDs have events, so only track them
+  // here when there is no pre-count
+  const size_t *counts = eventsPerDetIdInRange();
+  const bool trackUsedDetIds = (counts == nullptr);
+  std::vector<bool> usedDetIds(trackUsedDetIds ? m_max_detid - m_min_detid + 1 : 0, false);
 
   const double TOF_MIN = alg->filter_tof_min;
   const double TOF_MAX = alg->filter_tof_max;
@@ -239,9 +238,11 @@ void ProcessBankData::run() {
             badTofs++;
 
           // Track all the touched wi
-          const auto detidIndex = detId - m_min_detid;
-          if (!usedDetIds[detidIndex])
-            usedDetIds[detidIndex] = true;
+          if (trackUsedDetIds) {
+            const auto detidIndex = detId - m_min_detid;
+            if (!usedDetIds[detidIndex])
+              usedDetIds[detidIndex] = true;
+          }
         } // valid time-of-flight
 
       } // valid detector IDs
@@ -262,7 +263,8 @@ void ProcessBankData::run() {
   auto &outputWS = m_loader.m_ws;
   const size_t numEventLists = outputWS.getNumberHistograms();
   for (detid_t pixID = m_min_detid; pixID <= m_max_detid; ++pixID) {
-    if (usedDetIds[pixID - m_min_detid]) {
+    const auto detidIndex = static_cast<size_t>(pixID - m_min_detid);
+    if (trackUsedDetIds ? usedDetIds[detidIndex] : counts[detidIndex] > 0) {
       ++diagDetIdsTouched;
       // Find the workspace index corresponding to that pixel ID
       size_t wi = getWorkspaceIndexFromPixelID(pixID);
@@ -318,6 +320,20 @@ void ProcessBankData::run() {
     m_loader.diagLog(msg.str());
   }
 } // END-OF-RUN()
+
+/**
+ * The number of events on each detector ID in [m_min_detid, m_max_detid], from the counts shared by this bank's
+ * tasks when they cover this range, or else from this task's own pre-count.
+ * @return pointer where index 0 is m_min_detid, or nullptr if the events have not been counted
+ */
+const size_t *ProcessBankData::eventsPerDetIdInRange() const {
+  if (m_eventsPerDetId && m_min_detid >= m_eventsPerDetIdMin &&
+      static_cast<size_t>(m_max_detid - m_eventsPerDetIdMin) < m_eventsPerDetId->size())
+    return m_eventsPerDetId->data() + (m_min_detid - m_eventsPerDetIdMin);
+  if (!m_localCounts.empty())
+    return m_localCounts.data();
+  return nullptr;
+}
 
 /**
  * Get the workspace index for a given pixel ID. Throws if the pixel ID is
