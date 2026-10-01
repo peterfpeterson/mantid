@@ -39,13 +39,17 @@ public:
    * @param event_weight :: array with weights for events
    * @param min_event_id ;: minimum detector ID to load
    * @param max_event_id :: maximum detector ID to load
+   * @param eventsPerDetId :: optional number of events on each detector ID, covering at least
+   * [min_event_id, max_event_id]. When supplied, pre-counting uses it rather than scanning the events again.
+   * @param eventsPerDetIdMin :: detector ID of index 0 in eventsPerDetId
    */
   ProcessBankData(DefaultEventLoader &loader, const std::string &entry_name, API::Progress *prog,
                   std::shared_ptr<std::vector<uint32_t>> const &event_id,
                   std::shared_ptr<std::vector<float>> const &event_time_of_flight, size_t numEvents, size_t startAt,
                   std::shared_ptr<std::vector<uint64_t>> const &event_index,
                   std::shared_ptr<BankPulseTimes> const &thisBankPulseTimes, bool have_weight,
-                  std::shared_ptr<std::vector<float>> const &event_weight, detid_t min_event_id, detid_t max_event_id);
+                  std::shared_ptr<std::vector<float>> const &event_weight, detid_t min_event_id, detid_t max_event_id,
+                  std::shared_ptr<std::vector<size_t> const> eventsPerDetId = nullptr, detid_t eventsPerDetIdMin = 0);
 
   void run() override;
 
@@ -83,6 +87,15 @@ private:
   detid_t m_min_detid;
   /// Maximum pixel id (inclusive)
   detid_t m_max_detid;
+  /// Optional number of events on each detector ID, shared by the tasks for one bank
+  std::shared_ptr<std::vector<size_t> const> m_eventsPerDetId;
+  /// Detector ID of index 0 in m_eventsPerDetId
+  detid_t m_eventsPerDetIdMin;
+  /// Diagnostics: seconds and minor page faults spent counting and reserving in preCountAndReserveMem
+  double m_diagCountSeconds{0.};
+  double m_diagReserveSeconds{0.};
+  long m_diagCountFaults{0};
+  long m_diagReserveFaults{0};
 }; // ENDDEF-CLASS ProcessBankData
 } // namespace DataHandling
 } // namespace Mantid
