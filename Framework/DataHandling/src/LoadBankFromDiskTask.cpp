@@ -249,8 +249,8 @@ std::unique_ptr<std::vector<uint32_t>> LoadBankFromDiskTask::loadEventId(Nexus::
     m_loadError = true;
   }
 
-  // Now we allocate the required arrays
-  auto event_id = std::make_unique<std::vector<uint32_t>>(dim0);
+  // Now we allocate the required arrays, sized for only the events being loaded
+  auto event_id = std::make_unique<std::vector<uint32_t>>(m_loadError ? 0 : m_loadSize[0]);
 
   if (!m_loadError) {
     Nexus::IOHelper::readNexusSlab<uint32_t, Nexus::IOHelper::Narrowing::Prevent>(*event_id, file, m_detIdFieldName,
@@ -305,8 +305,8 @@ std::unique_ptr<std::vector<float>> LoadBankFromDiskTask::loadTof(Nexus::File &f
     m_loadError = true;
   }
 
-  // Allocate the array
-  auto event_time_of_flight = std::make_unique<std::vector<float>>(tof_dim0);
+  // Allocate the array, sized for only the events being loaded
+  auto event_time_of_flight = std::make_unique<std::vector<float>>(m_loadError ? 0 : m_loadSize[0]);
 
   // Mantid assumes event_time_offset to be float.
   // Nexus only requires event_time_offset to be a NXNumber.
