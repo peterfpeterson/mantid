@@ -10,9 +10,15 @@
 #include "MantidDataHandling/DllConfig.h"
 #include "MantidDataHandling/EventWorkspaceCollection.h"
 
+#include <chrono>
+#include <string>
+
 class BankPulseTimes;
 
 namespace Mantid {
+namespace Kernel {
+class ThreadScheduler;
+}
 namespace DataHandling {
 class LoadEventNexus;
 
@@ -75,6 +81,15 @@ public:
 
   /// One entry of pulse times for each preprocessor
   std::vector<std::shared_ptr<BankPulseTimes>> m_bankPulseTimes;
+
+  /// Diagnostics: time origin of the load
+  std::chrono::steady_clock::time_point m_diagStart;
+  /// Diagnostics: scheduler the tasks run on, used to report the queue length
+  Kernel::ThreadScheduler *m_diagScheduler{nullptr};
+  /// Diagnostics: seconds since the start of the load
+  double diagElapsed() const;
+  /// Diagnostics: write a "[LEN-DIAG]" notice line with the elapsed time, thread and queue length
+  void diagLog(const std::string &msg) const;
 
 private:
   DefaultEventLoader(LoadEventNexus *alg, EventWorkspaceCollection &ws, bool haveWeights, bool event_id_is_spec,

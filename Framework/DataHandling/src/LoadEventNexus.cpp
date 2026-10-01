@@ -1134,11 +1134,19 @@ void LoadEventNexus::loadEvents(API::Progress *const prog, const bool monitors) 
       throw std::invalid_argument("No entry named '" + *invalidBank + "' was found in the .NXS file.");
     }
 
+    // keep the number of events for the requested banks so they are weighted correctly
+    std::vector<std::size_t> eventedBankNumEvents;
+    eventedBankNumEvents.reserve(eventedBanks.size());
+    std::transform(eventedBanks.cbegin(), eventedBanks.cend(), std::back_inserter(eventedBankNumEvents),
+                   [&bankNames, &bankNumEvents](const auto &someBank) {
+                     const auto index =
+                         std::distance(bankNames.cbegin(), std::find(bankNames.cbegin(), bankNames.cend(), someBank));
+                     return bankNumEvents[index];
+                   });
+
     // change the number of banks to load
     bankNames.assign(eventedBanks.cbegin(), eventedBanks.cend());
-
-    // TODO this equally weights the banks
-    bankNumEvents.assign(someBanks.size(), 1);
+    bankNumEvents.assign(eventedBankNumEvents.cbegin(), eventedBankNumEvents.cend());
 
     if (!SingleBankPixelsOnly)
       someBanks.clear(); // Marker to load all pixels
