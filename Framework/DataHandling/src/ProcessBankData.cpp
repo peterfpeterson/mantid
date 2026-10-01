@@ -75,6 +75,10 @@ void ProcessBankData::preCountAndReserveMem() {
 void ProcessBankData::run() {
   // timer for performance
   Mantid::Kernel::Timer timer;
+  const std::string diagName =
+      "type=data bank=" + entry_name + " detids=" + std::to_string(m_min_detid) + "-" + std::to_string(m_max_detid);
+  m_loader.diagLog("process-start " + diagName + " cost=" + std::to_string(static_cast<size_t>(m_cost)));
+  const double diagStart = m_loader.diagElapsed();
 
   // Local tof limits
   double my_shortest_tof = static_cast<double>(std::numeric_limits<uint32_t>::max()) * 0.1;
@@ -238,6 +242,7 @@ void ProcessBankData::run() {
   event_index.reset();
   event_weight.reset();
   thisBankPulseTimes.reset();
+  m_loader.diagLog("process-end " + diagName + " duration=" + std::to_string(m_loader.diagElapsed() - diagStart));
 } // END-OF-RUN()
 
 /**

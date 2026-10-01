@@ -23,16 +23,14 @@ namespace DataHandling {
 class BankPulseTimes;
 class DefaultEventLoader;
 
-/** This task does the disk IO from loading the NXS file, and so will be on a
-  disk IO mutex
-*/
+/** This task does the disk IO from loading the NXS file
+ */
 class MANTID_DATAHANDLING_DLL LoadBankFromDiskTask : public Kernel::Task {
 
 public:
   LoadBankFromDiskTask(DefaultEventLoader &loader, std::string entry_name, std::string entry_type,
                        const std::size_t numEvents, const bool oldNeXusFileNames, API::Progress *prog,
-                       std::shared_ptr<std::mutex> ioMutex, Kernel::ThreadScheduler &scheduler,
-                       std::vector<int> framePeriodNumbers);
+                       Kernel::ThreadScheduler &scheduler, std::vector<int> framePeriodNumbers);
 
   void run() override;
 

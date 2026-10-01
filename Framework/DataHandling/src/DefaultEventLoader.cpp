@@ -9,7 +9,11 @@
 #include "MantidDataHandling/LoadBankFromDiskTask.h"
 #include "MantidDataHandling/LoadEventNexus.h"
 #include "MantidKernel/ThreadPool.h"
-#include "MantidKernel/ThreadSchedulerMutexes.h"
+#include "MantidKernel/ThreadScheduler.h"
+
+#include <iomanip>
+#include <sstream>
+#include <thread>
 
 using namespace Mantid::Kernel;
 
@@ -25,9 +29,12 @@ void DefaultEventLoader::load(LoadEventNexus *alg, EventWorkspaceCollection &ws,
   auto bankRange = loader.setupChunking(bankNames, bankNumEvents);
 
   // Make the thread pool
-  auto scheduler = new ThreadSchedulerMutexes;
+  auto scheduler = new ThreadSchedulerLargestCost;
   ThreadPool pool(scheduler);
-  auto diskIOMutex = std::make_shared<std::mutex>();
+  loader.m_diagStart = std::chrono::steady_clock::now();
+  loader.m_diagScheduler = scheduler;
+  loader.diagLog("load-begin banks=" + std::to_string(bankRange.second - bankRange.first) +
+                 " threads=" + std::to_string(ThreadPool::getNumPhysicalCores()) + " scheduler=LargestCost");
 
   // set up progress bar for the rest of the (multi-threaded) process
   size_t numProg = bankNames.size() * (1 + 3); // 1 = disktask, 3 = proc task
@@ -36,14 +43,18 @@ void DefaultEventLoader::load(LoadEventNexus *alg, EventWorkspaceCollection &ws,
   auto prog = std::make_unique<API::Progress>(loader.alg, 0.3, 1.0, numProg);
 
   for (size_t i = bankRange.first; i < bankRange.second; i++) {
-    if (bankNumEvents[i] > 0)
+    if (bankNumEvents[i] > 0) {
+      loader.diagLog("queued-disk bank=" + bankNames[i] + " cost=" + std::to_string(bankNumEvents[i]));
       pool.schedule(std::make_shared<LoadBankFromDiskTask>(loader, bankNames[i], classType, bankNumEvents[i],
-                                                           oldNeXusFileNames, prog.get(), diskIOMutex, *scheduler,
-                                                           periodLog));
+                                                           oldNeXusFileNames, prog.get(), *scheduler, periodLog));
+    } else {
+      loader.diagLog("skipped-empty bank=" + bankNames[i]);
+    }
   }
   // Start and end all threads
   pool.joinAll();
-  diskIOMutex.reset();
+  loader.diagLog("load-end");
+  loader.m_diagScheduler = nullptr;
 }
 
 DefaultEventLoader::DefaultEventLoader(LoadEventNexus *alg, EventWorkspaceCollection &ws, bool haveWeights,
@@ -144,6 +155,20 @@ std::pair<size_t, size_t> DefaultEventLoader::setupChunking(std::vector<std::str
     }
   }
   return {bank0, bankn};
+}
+
+double DefaultEventLoader::diagElapsed() const {
+  return std::chrono::duration<double>(std::chrono::steady_clock::now() - m_diagStart).count();
+}
+
+void DefaultEventLoader::diagLog(const std::string &msg) const {
+  std::ostringstream line;
+  line << "[LEN-DIAG] t=" << std::fixed << std::setprecision(4) << diagElapsed()
+       << " tid=" << std::this_thread::get_id();
+  if (m_diagScheduler)
+    line << " queue=" << m_diagScheduler->size();
+  line << " " << msg << "\n";
+  alg->getLogger().notice() << line.str();
 }
 
 } // namespace Mantid::DataHandling
