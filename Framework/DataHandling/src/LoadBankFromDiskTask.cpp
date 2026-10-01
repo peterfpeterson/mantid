@@ -333,8 +333,8 @@ void LoadBankFromDiskTask::run() {
   std::shared_ptr<std::vector<float>> event_weight;
   std::shared_ptr<std::vector<uint64_t>> event_index;
 
-  // Open the file
-  Nexus::File file(m_loader.alg->m_filename);
+  // Copy the algorithm's open file: shares the HDF5 handle so the descriptor is not rebuilt
+  Nexus::File file(*m_loader.alg->m_file);
   try {
     // Navigate into the file
     file.openGroup(m_loader.alg->m_top_entry_name, "NXentry");
