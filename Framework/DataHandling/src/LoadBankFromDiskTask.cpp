@@ -18,14 +18,85 @@
 #include "MantidNexus/NexusFile.h"
 #include "MantidNexus/NexusIOHelper.h"
 
+#include "tbb/blocked_range.h"
+#include "tbb/parallel_reduce.h"
+
 #include <algorithm>
 #include <chrono>
+#include <functional>
+#include <numeric>
 #include <sstream>
 #include <utility>
 
 namespace {
 // this is used for unit conversion to correct units
 const std::string MICROSEC("microseconds");
+
+/** EventsPerDetIdCounter
+ * A functor for use with tbb::parallel_reduce, which counts the events on each detector ID in [minId, maxId] over a
+ * subrange of the event ids. Each split counts into its own vector, and these are then added together.
+ */
+class EventsPerDetIdCounter {
+  std::vector<uint32_t> const *m_detIds;
+  uint32_t m_minId;
+  uint32_t m_maxId;
+
+public:
+  std::vector<size_t> counts;
+
+  EventsPerDetIdCounter(std::vector<uint32_t> const *detIds, const uint32_t minId, const uint32_t maxId)
+      : m_detIds(detIds), m_minId(minId), m_maxId(maxId), counts(static_cast<size_t>(maxId - minId) + 1, 0) {}
+
+  // start the split with its own empty counts
+  EventsPerDetIdCounter(EventsPerDetIdCounter &other, tbb::split)
+      : m_detIds(other.m_detIds), m_minId(other.m_minId), m_maxId(other.m_maxId), counts(other.counts.size(), 0) {}
+
+  void operator()(tbb::blocked_range<size_t> const &range) {
+    for (size_t i = range.begin(); i < range.end(); ++i) {
+      const auto detId = (*m_detIds)[i];
+      if (detId >= m_minId && detId <= m_maxId)
+        ++counts[detId - m_minId];
+    }
+  }
+
+  void join(EventsPerDetIdCounter const &other) {
+    std::transform(counts.cbegin(), counts.cend(), other.counts.cbegin(), counts.begin(), std::plus<size_t>());
+  }
+};
+
+/** Count the events on each detector ID in [minId, maxId], using the first numEvents entries of detIds
+ * @return the counts, where index 0 is minId
+ */
+std::vector<size_t> countEventsPerDetId(std::vector<uint32_t> const &detIds, const size_t numEvents,
+                                        const uint32_t minId, const uint32_t maxId) {
+  // large grains keep the number of splits, each with its own counts, small
+  constexpr size_t GRAINSIZE{1 << 20};
+  EventsPerDetIdCounter counter(&detIds, minId, maxId);
+  tbb::parallel_reduce(tbb::blocked_range<size_t>(0, std::min(numEvents, detIds.size()), GRAINSIZE), counter);
+  return std::move(counter.counts);
+}
+
+/** Find the detector ID to split [minId, maxId] at so each side has about half the events
+ * @param counts :: events per detector ID, where index 0 is minId
+ * @param minId :: first detector ID in counts
+ * @return the last detector ID of the first half
+ */
+uint32_t balancedMidId(std::vector<size_t> const &counts, const uint32_t minId) {
+  const size_t total = std::accumulate(counts.cbegin(), counts.cend(), static_cast<size_t>(0));
+  const size_t half = (total + 1) / 2;
+  size_t cumulative = 0;
+  for (size_t i = 0; i < counts.size(); ++i) {
+    cumulative += counts[i];
+    if (cumulative >= half)
+      return minId + static_cast<uint32_t>(i);
+  }
+  return minId + static_cast<uint32_t>(counts.size() - 1);
+}
+
+/// Number of events on detector IDs [minId, lastId], where index 0 of counts is minId
+size_t eventsUpTo(std::vector<size_t> const &counts, const uint32_t minId, const uint32_t lastId) {
+  return std::accumulate(counts.cbegin(), counts.cbegin() + (lastId - minId) + 1, static_cast<size_t>(0));
+}
 } // namespace
 
 namespace Mantid::DataHandling {
@@ -474,11 +545,42 @@ void LoadBankFromDiskTask::run() {
   }
 
   // schedule the job to generate the event lists
+  const bool useCompressed =
+      (m_loader.alg->compressEvents) && (!event_weight) && (m_loader.alg->compressTolerance != 0);
+  // only split if told to and the section to load is at least 1/4 the size
+  // of the whole bank
+  const bool splitBank = m_loader.splitProcessing && m_max_id > (m_min_id + (bank_size / 4));
+
+  // count the events on each detector ID once, in parallel. This chooses where to split the bank and lets the
+  // processing tasks reserve memory without each scanning all the events again.
+  std::shared_ptr<std::vector<size_t> const> eventsPerDetId;
+  double countSeconds = 0.;
+  if (splitBank || (m_loader.precount && !useCompressed)) {
+    const auto countStart = std::chrono::steady_clock::now();
+    eventsPerDetId = std::make_shared<std::vector<size_t> const>(
+        countEventsPerDetId(*event_id, static_cast<size_t>(m_loadSize[0]), m_min_id, m_max_id));
+    countSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - countStart).count();
+  }
+
   auto mid_id = m_max_id;
-  if (m_loader.splitProcessing && m_max_id > (m_min_id + (bank_size / 4)))
-    // only split if told to and the section to load is at least 1/4 the size
-    // of the whole bank
-    mid_id = (m_max_id + m_min_id) / 2;
+  if (splitBank) {
+    const auto &counts = *eventsPerDetId;
+    const auto midpoint_id = (m_max_id + m_min_id) / 2;
+    // split where each half has about the same number of events, so both processing tasks finish together
+    mid_id = balancedMidId(counts, m_min_id);
+
+    const size_t total = eventsUpTo(counts, m_min_id, m_max_id);
+    const size_t balancedFirst = eventsUpTo(counts, m_min_id, mid_id);
+    const size_t midpointFirst = eventsUpTo(counts, m_min_id, midpoint_id);
+    std::ostringstream msg;
+    msg << "balance bank=" << entry_name << " count_seconds=" << countSeconds << " detids=" << m_min_id << "-"
+        << m_max_id << " events=" << total << " midpoint_id=" << midpoint_id << " midpoint_halves=" << midpointFirst
+        << "/" << (total - midpointFirst) << " balanced_id=" << mid_id << " balanced_halves=" << balancedFirst << "/"
+        << (total - balancedFirst);
+    m_loader.diagLog(msg.str());
+  } else if (eventsPerDetId) {
+    m_loader.diagLog("balance bank=" + entry_name + " count_seconds=" + std::to_string(countSeconds) + " not split");
+  }
 
   // No error? Launch a new task to process that data.
   auto diagQueued = [this](const std::string &type, Task &task, const uint32_t minId, const uint32_t maxId) {
@@ -488,7 +590,7 @@ void LoadBankFromDiskTask::run() {
   const auto numEvents = static_cast<size_t>(m_loadSize[0]);
   const auto startAt = static_cast<size_t>(m_loadStart[0]);
 
-  if ((m_loader.alg->compressEvents) && (!event_weight) && (m_loader.alg->compressTolerance != 0)) {
+  if (useCompressed) {
     // this method is for unweighted events that the user wants compressed on load
 
     // TODO should this be created elsewhere?
@@ -553,13 +655,13 @@ void LoadBankFromDiskTask::run() {
     const std::string TASK_TYPE("data");
     std::shared_ptr<Task> newTask1 = std::make_shared<ProcessBankData>(
         m_loader, entry_name, prog, event_id, event_time_of_flight, numEvents, startAt, event_index, thisBankPulseTimes,
-        m_have_weight, event_weight, m_min_id, mid_id);
+        m_have_weight, event_weight, m_min_id, mid_id, eventsPerDetId, m_min_id);
     diagQueued(TASK_TYPE, *newTask1, m_min_id, mid_id);
     scheduler.push(newTask1);
     if (m_loader.splitProcessing && (mid_id < m_max_id)) {
       std::shared_ptr<Task> newTask2 = std::make_shared<ProcessBankData>(
           m_loader, entry_name, prog, event_id, event_time_of_flight, numEvents, startAt, event_index,
-          thisBankPulseTimes, m_have_weight, event_weight, (mid_id + 1), m_max_id);
+          thisBankPulseTimes, m_have_weight, event_weight, (mid_id + 1), m_max_id, eventsPerDetId, m_min_id);
       diagQueued(TASK_TYPE, *newTask2, mid_id + 1, m_max_id);
       scheduler.push(newTask2);
     }

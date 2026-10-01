@@ -12,9 +12,13 @@
 #include "MantidKernel/ThreadScheduler.h"
 
 #include <algorithm>
+#include <fstream>
 #include <iomanip>
 #include <sstream>
 #include <thread>
+#ifdef __linux__
+#include <unistd.h>
+#endif
 
 using namespace Mantid::Kernel;
 
@@ -172,6 +176,15 @@ void DefaultEventLoader::diagLog(const std::string &msg) const {
        << " tid=" << std::this_thread::get_id();
   if (m_diagScheduler)
     line << " queue=" << m_diagScheduler->size();
+#ifdef __linux__
+  // resident set size in MiB, from the second field of /proc/self/statm (in pages)
+  {
+    std::ifstream statm("/proc/self/statm");
+    size_t sizePages = 0, residentPages = 0;
+    if (statm >> sizePages >> residentPages)
+      line << " rss_mib=" << (residentPages * static_cast<size_t>(sysconf(_SC_PAGESIZE))) / (1024 * 1024);
+  }
+#endif
   line << " " << msg << "\n";
   alg->getLogger().notice() << line.str();
 }
