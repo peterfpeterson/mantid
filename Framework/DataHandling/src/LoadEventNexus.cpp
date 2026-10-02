@@ -490,6 +490,10 @@ void LoadEventNexus::exec() {
     prog.report("Loading monitors");
     this->runLoadMonitors();
   }
+
+  // The output property now holds the workspace. Release this algorithm's own reference so the workspace's memory
+  // is freed once it leaves the ADS, rather than when the finished algorithm is deleted.
+  m_ws.reset();
 }
 
 std::pair<DateAndTime, DateAndTime> firstLastPulseTimes(Nexus::File &file, Kernel::Logger &logger) {
