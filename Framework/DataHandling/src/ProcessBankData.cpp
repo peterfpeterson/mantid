@@ -12,46 +12,11 @@
 #include "MantidDataHandling/PulseIndexer.h"
 #include "MantidKernel/Timer.h"
 
-#include <chrono>
 #include <sstream>
-#ifdef __linux__
-#include <sys/resource.h>
-#endif
 
 using namespace Mantid::DataObjects;
 
 namespace Mantid::DataHandling {
-
-namespace {
-/// Diagnostics: minor page faults of the calling thread so far, or 0 where that is not available
-long threadMinorFaults() {
-#ifdef __linux__
-  rusage usage{};
-  if (getrusage(RUSAGE_THREAD, &usage) == 0)
-    return usage.ru_minflt;
-#endif
-  return 0;
-}
-
-/// Diagnostics: wall time and minor page faults of the calling thread between laps
-class DiagLap {
-public:
-  DiagLap() : m_time(std::chrono::steady_clock::now()), m_faults(threadMinorFaults()) {}
-  /// Seconds and minor page faults since the previous lap, or since construction
-  std::pair<double, long> lap() {
-    const auto now = std::chrono::steady_clock::now();
-    const auto faults = threadMinorFaults();
-    const std::pair<double, long> result{std::chrono::duration<double>(now - m_time).count(), faults - m_faults};
-    m_time = now;
-    m_faults = faults;
-    return result;
-  }
-
-private:
-  std::chrono::steady_clock::time_point m_time;
-  long m_faults;
-};
-} // namespace
 
 ProcessBankData::ProcessBankData(DefaultEventLoader &m_loader, const std::string &entry_name, API::Progress *prog,
                                  std::shared_ptr<std::vector<uint32_t>> const &event_id,
@@ -81,7 +46,6 @@ ProcessBankData::ProcessBankData(DefaultEventLoader &m_loader, const std::string
  */
 void ProcessBankData::preCountAndReserveMem() {
   // ---- Pre-counting events per pixel ID ----
-  DiagLap diagLap;
   // use the counts shared by this bank's tasks when they cover this range, rather than scanning all the events again
   if (!eventsPerDetIdInRange()) {
     m_localCounts.assign(m_max_detid - m_min_detid + 1, 0);
@@ -93,7 +57,6 @@ void ProcessBankData::preCountAndReserveMem() {
   }
   // index 0 is m_min_detid
   const size_t *counts = eventsPerDetIdInRange();
-  std::tie(m_diagCountSeconds, m_diagCountFaults) = diagLap.lap();
 
   // Now we pre-allocate (reserve) the vectors of events in each pixel counted
   auto &outputWS = m_loader.m_ws;
@@ -112,7 +75,6 @@ void ProcessBankData::preCountAndReserveMem() {
         return; // User cancellation
     }
   }
-  std::tie(m_diagReserveSeconds, m_diagReserveFaults) = diagLap.lap();
 }
 
 /** Run the data processing
@@ -121,14 +83,6 @@ void ProcessBankData::preCountAndReserveMem() {
 void ProcessBankData::run() {
   // timer for performance
   Mantid::Kernel::Timer timer;
-  const std::string diagName =
-      "type=data bank=" + entry_name + " detids=" + std::to_string(m_min_detid) + "-" + std::to_string(m_max_detid);
-  m_loader.diagLog("process-start " + diagName + " cost=" + std::to_string(static_cast<size_t>(m_cost)));
-  const double diagStart = m_loader.diagElapsed();
-  // diagnostics: per-phase wall time and minor page faults, and how many events and detector IDs this task fills
-  std::pair<double, long> diagSetup, diagFill, diagFinal, diagTofJoin;
-  size_t diagEventsAdded = 0;
-  size_t diagDetIdsTouched = 0;
 
   // Local tof limits and counts
   TofStats tofStats;
@@ -141,7 +95,6 @@ void ProcessBankData::run() {
       return; // User cancellation
   }
 
-  DiagLap diagLap;
   // this assumes that pulse indices are sorted
   if (!std::is_sorted(event_index->cbegin(), event_index->cend()))
     throw std::runtime_error("Event index is not sorted");
@@ -165,7 +118,6 @@ void ProcessBankData::run() {
   // set up wall-clock filtering if it was requested
   const PulseIndexer pulseIndexer(event_index, startAt, numEvents, entry_name,
                                   m_loader.pulseIndicesToLoad(*thisBankPulseTimes));
-  diagSetup = diagLap.lap();
 
   // loop over all pulses
   for (const auto &pulseIter : pulseIndexer) {
@@ -191,7 +143,6 @@ void ProcessBankData::run() {
               const auto weight = static_cast<double>((*event_weight)[eventIndex]);
               const double errorSq = weight * weight;
               eventVector->emplace_back(tof, pulsetime, weight, errorSq);
-              ++diagEventsAdded;
             } else {
               ++tofStats.discardedEvents;
             }
@@ -201,7 +152,6 @@ void ProcessBankData::run() {
             // NULL eventVector indicates a bad spectrum lookup
             if (eventVector) {
               eventVector->emplace_back(std::move(tof), pulsetime);
-              ++diagEventsAdded;
             } else {
               ++tofStats.discardedEvents;
             }
@@ -225,8 +175,6 @@ void ProcessBankData::run() {
       return;
   } // for pulses
 
-  diagFill = diagLap.lap();
-
   // Default pulse time (if none are found)
   const auto pulseSortingType =
       thisBankPulseTimes->arePulseTimesIncreasing() ? DataObjects::PULSETIME_SORT : DataObjects::UNSORTED;
@@ -238,7 +186,6 @@ void ProcessBankData::run() {
   for (detid_t pixID = m_min_detid; pixID <= m_max_detid; ++pixID) {
     const auto detidIndex = static_cast<size_t>(pixID - m_min_detid);
     if (trackUsedDetIds ? usedDetIds[detidIndex] : counts[detidIndex] > 0) {
-      ++diagDetIdsTouched;
       // Find the workspace index corresponding to that pixel ID
       size_t wi = getWorkspaceIndexFromPixelID(pixID);
       if (wi < numEventLists) {
@@ -251,7 +198,6 @@ void ProcessBankData::run() {
       }
     }
   }
-  diagFinal = diagLap.lap();
   prog->report(entry_name + ": filled events");
 
   alg->getLogger().debug() << entry_name << (thisBankPulseTimes->arePulseTimesIncreasing() ? " had " : " DID NOT have ")
@@ -259,7 +205,6 @@ void ProcessBankData::run() {
 
   // Join back up the tof limits to the global ones
   m_loader.addTofStats(tofStats);
-  diagTofJoin = diagLap.lap();
 
 #ifndef _WIN32
   if (alg->getLogger().isDebug())
@@ -270,17 +215,6 @@ void ProcessBankData::run() {
   event_index.reset();
   event_weight.reset();
   thisBankPulseTimes.reset();
-  m_loader.diagLog("process-end " + diagName + " duration=" + std::to_string(m_loader.diagElapsed() - diagStart));
-  {
-    std::ostringstream msg;
-    msg << "process-phases " << diagName << " events_added=" << diagEventsAdded
-        << " detids_touched=" << diagDetIdsTouched << " precount_count=" << m_diagCountSeconds << "s/"
-        << m_diagCountFaults << "pf precount_reserve=" << m_diagReserveSeconds << "s/" << m_diagReserveFaults
-        << "pf setup=" << diagSetup.first << "s/" << diagSetup.second << "pf fill=" << diagFill.first << "s/"
-        << diagFill.second << "pf final=" << diagFinal.first << "s/" << diagFinal.second
-        << "pf tofjoin=" << diagTofJoin.first << "s/" << diagTofJoin.second << "pf";
-    m_loader.diagLog(msg.str());
-  }
 } // END-OF-RUN()
 
 /**

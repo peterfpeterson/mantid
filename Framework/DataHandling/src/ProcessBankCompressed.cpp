@@ -220,10 +220,6 @@ void ProcessBankCompressed::run() {
   // timer for performance
   Kernel::Timer timer;
   auto *alg = m_loader.alg;
-  const std::string diagName = "type=compressed bank=" + m_entry_name + " detids=" + std::to_string(m_detid_min) + "-" +
-                               std::to_string(m_detid_max);
-  m_loader.diagLog("process-start " + diagName + " cost=" + std::to_string(static_cast<size_t>(m_cost)));
-  const double diagStart = m_loader.diagElapsed();
 
   this->createAccumulators(m_loader.precount);
   m_prog->report();
@@ -252,7 +248,6 @@ void ProcessBankCompressed::run() {
   if (alg->getLogger().isDebug())
     alg->getLogger().debug() << "Time to ProcessBankCompressed " << m_entry_name << " " << timer << "\n";
 #endif
-  m_loader.diagLog("process-end " + diagName + " duration=" + std::to_string(m_loader.diagElapsed() - diagStart));
 } // END-OF-RUN()
 
 double ProcessBankCompressed::totalWeight() const {

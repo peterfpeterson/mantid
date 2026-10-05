@@ -24,10 +24,8 @@
 #include "tbb/parallel_reduce.h"
 
 #include <algorithm>
-#include <chrono>
 #include <functional>
 #include <numeric>
-#include <sstream>
 #include <utility>
 
 namespace {
@@ -242,10 +240,6 @@ fillRanges(const PulseRanges &ranges, const Mantid::DataHandling::BankPulseTimes
   return total;
 }
 
-/// Number of events on detector IDs [minId, lastId], where index 0 of counts is minId
-size_t eventsUpTo(std::vector<size_t> const &counts, const uint32_t minId, const uint32_t lastId) {
-  return std::accumulate(counts.cbegin(), counts.cbegin() + (lastId - minId) + 1, static_cast<size_t>(0));
-}
 } // namespace
 
 namespace Mantid::DataHandling {
@@ -551,17 +545,6 @@ void LoadBankFromDiskTask::run() {
 
   prog->report(entry_name + ": load from disk");
 
-  // diagnostics: seconds spent in each phase of reading the bank
-  m_loader.diagLog("disk-start bank=" + entry_name + " cost=" + std::to_string(static_cast<size_t>(m_cost)));
-  auto diagMark = std::chrono::steady_clock::now();
-  auto diagLap = [&diagMark]() {
-    const auto now = std::chrono::steady_clock::now();
-    const double seconds = std::chrono::duration<double>(now - diagMark).count();
-    diagMark = now;
-    return seconds;
-  };
-  double tOpen = 0., tIndex = 0., tPulse = 0., tId = 0., tTof = 0., tWeights = 0., tClose = 0.;
-
   // arrays to load into
   std::shared_ptr<std::vector<uint32_t>> event_id;
   std::shared_ptr<std::vector<float>> event_time_of_flight;
@@ -575,7 +558,6 @@ void LoadBankFromDiskTask::run() {
     file.openGroup(m_loader.alg->m_top_entry_name, "NXentry");
     // Open the bankN_event group
     file.openGroup(entry_name, entry_type);
-    tOpen = diagLap();
 
     const bool needPulseInfo = (!m_loader.alg->compressEvents) || m_loader.alg->compressTolerance == 0 ||
                                m_loader.m_ws.nPeriods() > 1 || m_loader.alg->m_is_time_filtered ||
@@ -586,7 +568,6 @@ void LoadBankFromDiskTask::run() {
       event_index = this->loadEventIndex(file);
     else
       event_index = nullptr;
-    tIndex = diagLap();
 
     if (!m_loadError) {
       // Load and validate the pulse times
@@ -594,7 +575,6 @@ void LoadBankFromDiskTask::run() {
         this->loadPulseTimes(file);
       else
         thisBankPulseTimes = nullptr;
-      tPulse = diagLap();
       // The event_index should be the same length as the pulse times from DAS
       // logs.
       if (event_index && event_index->size() != thisBankPulseTimes->numberOfPulses())
@@ -622,7 +602,6 @@ void LoadBankFromDiskTask::run() {
         // Load pixel IDs
         if (!m_loadError)
           event_id = this->loadEventId(file);
-        tId = diagLap();
 
         // for compression the number of events needs to come from elsewhere
         if (!event_index)
@@ -636,10 +615,8 @@ void LoadBankFromDiskTask::run() {
         // And TOF.
         if (!m_loadError) {
           event_time_of_flight = this->loadTof(file);
-          tTof = diagLap();
           if (m_have_weight) {
             event_weight = this->loadEventWeights(file);
-            tWeights = diagLap();
           }
         }
       } // Size is at least 1
@@ -665,15 +642,6 @@ void LoadBankFromDiskTask::run() {
   // Close up the file even if errors occured.
   file.closeGroup();
   file.close();
-  tClose = diagLap();
-  {
-    std::ostringstream msg;
-    msg << "disk-read-done bank=" << entry_name << " events=" << m_loadSize[0] << " error=" << m_loadError
-        << " open=" << tOpen << " index=" << tIndex << " pulse=" << tPulse << " id=" << tId << " tof=" << tTof
-        << " weights=" << tWeights << " close=" << tClose
-        << " total=" << (tOpen + tIndex + tPulse + tId + tTof + tWeights + tClose);
-    m_loader.diagLog(msg.str());
-  }
 
   // Abort if anything failed
   if (m_loadError) {
@@ -720,7 +688,6 @@ void LoadBankFromDiskTask::run() {
                                     numFillRanges(static_cast<size_t>(m_loadSize[0])))) {
     // the processing tasks this replaces would have reported 3 steps each
     prog->reportIncrement(m_loader.splitProcessing ? 6 : 3, entry_name + ": filled events");
-    m_loader.diagLog("disk-end bank=" + entry_name);
     thisBankPulseTimes.reset();
     return;
   }
@@ -733,39 +700,15 @@ void LoadBankFromDiskTask::run() {
   // count the events on each detector ID once, in parallel. This chooses where to split the bank and lets the
   // processing tasks reserve memory without each scanning all the events again.
   std::shared_ptr<std::vector<size_t> const> eventsPerDetId;
-  double countSeconds = 0.;
   if (splitBank || (m_loader.precount && !useCompressed)) {
-    const auto countStart = std::chrono::steady_clock::now();
     eventsPerDetId = std::make_shared<std::vector<size_t> const>(
         countEventsPerDetId(*event_id, static_cast<size_t>(m_loadSize[0]), m_min_id, m_max_id));
-    countSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - countStart).count();
   }
 
-  auto mid_id = m_max_id;
-  if (splitBank) {
-    const auto &counts = *eventsPerDetId;
-    const auto midpoint_id = (m_max_id + m_min_id) / 2;
-    // split where each half has about the same number of events, so both processing tasks finish together
-    mid_id = balancedMidId(counts, m_min_id);
-
-    const size_t total = eventsUpTo(counts, m_min_id, m_max_id);
-    const size_t balancedFirst = eventsUpTo(counts, m_min_id, mid_id);
-    const size_t midpointFirst = eventsUpTo(counts, m_min_id, midpoint_id);
-    std::ostringstream msg;
-    msg << "balance bank=" << entry_name << " count_seconds=" << countSeconds << " detids=" << m_min_id << "-"
-        << m_max_id << " events=" << total << " midpoint_id=" << midpoint_id << " midpoint_halves=" << midpointFirst
-        << "/" << (total - midpointFirst) << " balanced_id=" << mid_id << " balanced_halves=" << balancedFirst << "/"
-        << (total - balancedFirst);
-    m_loader.diagLog(msg.str());
-  } else if (eventsPerDetId) {
-    m_loader.diagLog("balance bank=" + entry_name + " count_seconds=" + std::to_string(countSeconds) + " not split");
-  }
+  // split where each half has about the same number of events, so both processing tasks finish together
+  const auto mid_id = splitBank ? balancedMidId(*eventsPerDetId, m_min_id) : m_max_id;
 
   // No error? Launch a new task to process that data.
-  auto diagQueued = [this](const std::string &type, Task &task, const uint32_t minId, const uint32_t maxId) {
-    m_loader.diagLog("queued-process type=" + type + " bank=" + entry_name + " detids=" + std::to_string(minId) + "-" +
-                     std::to_string(maxId) + " cost=" + std::to_string(static_cast<size_t>(task.cost())));
-  };
   const auto numEvents = static_cast<size_t>(m_loadSize[0]);
   const auto startAt = static_cast<size_t>(m_loadStart[0]);
 
@@ -808,32 +751,26 @@ void LoadBankFromDiskTask::run() {
     Mantid::Kernel::VectorHelper::createAxisFromRebinParams(params, *histogram_bin_edges);
 
     // create the tasks
-    const std::string TASK_TYPE("compressed");
     std::shared_ptr<Task> newTask1 = std::make_shared<ProcessBankCompressed>(
         m_loader, entry_name, prog, event_id, event_time_of_flight, startAt, event_index, thisBankPulseTimes, m_min_id,
         mid_id, histogram_bin_edges, m_loader.alg->compressTolerance);
-    diagQueued(TASK_TYPE, *newTask1, m_min_id, mid_id);
     scheduler.push(newTask1);
     if (m_loader.splitProcessing && (mid_id < m_max_id)) {
       std::shared_ptr<Task> newTask2 = std::make_shared<ProcessBankCompressed>(
           m_loader, entry_name, prog, event_id, event_time_of_flight, startAt, event_index, thisBankPulseTimes,
           (mid_id + 1), m_max_id, histogram_bin_edges, m_loader.alg->compressTolerance);
-      diagQueued(TASK_TYPE, *newTask2, mid_id + 1, m_max_id);
       scheduler.push(newTask2);
     }
   } else {
     // create all events using traditional method
-    const std::string TASK_TYPE("data");
     std::shared_ptr<Task> newTask1 = std::make_shared<ProcessBankData>(
         m_loader, entry_name, prog, event_id, event_time_of_flight, numEvents, startAt, event_index, thisBankPulseTimes,
         m_have_weight, event_weight, m_min_id, mid_id, eventsPerDetId, m_min_id);
-    diagQueued(TASK_TYPE, *newTask1, m_min_id, mid_id);
     scheduler.push(newTask1);
     if (m_loader.splitProcessing && (mid_id < m_max_id)) {
       std::shared_ptr<Task> newTask2 = std::make_shared<ProcessBankData>(
           m_loader, entry_name, prog, event_id, event_time_of_flight, numEvents, startAt, event_index,
           thisBankPulseTimes, m_have_weight, event_weight, (mid_id + 1), m_max_id, eventsPerDetId, m_min_id);
-      diagQueued(TASK_TYPE, *newTask2, mid_id + 1, m_max_id);
       scheduler.push(newTask2);
     }
   }
@@ -842,7 +779,6 @@ void LoadBankFromDiskTask::run() {
   if (m_loader.alg->getLogger().isDebug())
     m_loader.alg->getLogger().debug() << "Time to LoadBankFromDisk " << entry_name << " " << timer << "\n";
 #endif
-  m_loader.diagLog("disk-end bank=" + entry_name);
   thisBankPulseTimes.reset();
 }
 

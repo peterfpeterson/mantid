@@ -14,13 +14,6 @@
 #include "MantidKernel/TimeROI.h"
 
 #include <algorithm>
-#include <fstream>
-#include <iomanip>
-#include <sstream>
-#include <thread>
-#ifdef __linux__
-#include <unistd.h>
-#endif
 
 using namespace Mantid::Kernel;
 
@@ -38,10 +31,6 @@ void DefaultEventLoader::load(LoadEventNexus *alg, EventWorkspaceCollection &ws,
   // Make the thread pool
   auto scheduler = new ThreadSchedulerLargestCost;
   ThreadPool pool(scheduler);
-  loader.m_diagStart = std::chrono::steady_clock::now();
-  loader.m_diagScheduler = scheduler;
-  loader.diagLog("load-begin banks=" + std::to_string(bankRange.second - bankRange.first) +
-                 " threads=" + std::to_string(ThreadPool::getNumPhysicalCores()) + " scheduler=LargestCost");
 
   // set up progress bar for the rest of the (multi-threaded) process
   // only the non-empty banks in this chunk's range get tasks, so only count those
@@ -54,18 +43,12 @@ void DefaultEventLoader::load(LoadEventNexus *alg, EventWorkspaceCollection &ws,
   auto prog = std::make_unique<API::Progress>(loader.alg, 0.3, 1.0, numProg);
 
   for (size_t i = bankRange.first; i < bankRange.second; i++) {
-    if (bankNumEvents[i] > 0) {
-      loader.diagLog("queued-disk bank=" + bankNames[i] + " cost=" + std::to_string(bankNumEvents[i]));
+    if (bankNumEvents[i] > 0)
       pool.schedule(std::make_shared<LoadBankFromDiskTask>(loader, bankNames[i], classType, bankNumEvents[i],
                                                            oldNeXusFileNames, prog.get(), *scheduler, periodLog));
-    } else {
-      loader.diagLog("skipped-empty bank=" + bankNames[i]);
-    }
   }
   // Start and end all threads
   pool.joinAll();
-  loader.diagLog("load-end");
-  loader.m_diagScheduler = nullptr;
 }
 
 DefaultEventLoader::DefaultEventLoader(LoadEventNexus *alg, EventWorkspaceCollection &ws, bool haveWeights,
@@ -199,29 +182,6 @@ std::optional<size_t> DefaultEventLoader::workspaceIndexOf(const detid_t id) con
   if (offsetId < 0 || static_cast<size_t>(offsetId) >= pixelID_to_wi_vector.size())
     return std::nullopt;
   return pixelID_to_wi_vector[static_cast<size_t>(offsetId)];
-}
-
-double DefaultEventLoader::diagElapsed() const {
-  return std::chrono::duration<double>(std::chrono::steady_clock::now() - m_diagStart).count();
-}
-
-void DefaultEventLoader::diagLog(const std::string &msg) const {
-  std::ostringstream line;
-  line << "[LEN-DIAG] t=" << std::fixed << std::setprecision(4) << diagElapsed()
-       << " tid=" << std::this_thread::get_id();
-  if (m_diagScheduler)
-    line << " queue=" << m_diagScheduler->size();
-#ifdef __linux__
-  // resident set size in MiB, from the second field of /proc/self/statm (in pages)
-  {
-    std::ifstream statm("/proc/self/statm");
-    size_t sizePages = 0, residentPages = 0;
-    if (statm >> sizePages >> residentPages)
-      line << " rss_mib=" << (residentPages * static_cast<size_t>(sysconf(_SC_PAGESIZE))) / (1024 * 1024);
-  }
-#endif
-  line << " " << msg << "\n";
-  alg->getLogger().notice() << line.str();
 }
 
 } // namespace Mantid::DataHandling
