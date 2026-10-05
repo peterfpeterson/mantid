@@ -90,11 +90,6 @@ private:
   detid_t m_eventsPerDetIdMin;
   /// Number of events on each detector ID in [m_min_detid, m_max_detid], when counted by this task
   std::vector<size_t> m_localCounts;
-  /// Diagnostics: seconds and minor page faults spent counting and reserving in preCountAndReserveMem
-  double m_diagCountSeconds{0.};
-  double m_diagReserveSeconds{0.};
-  long m_diagCountFaults{0};
-  long m_diagReserveFaults{0};
 }; // ENDDEF-CLASS ProcessBankData
 } // namespace DataHandling
 } // namespace Mantid

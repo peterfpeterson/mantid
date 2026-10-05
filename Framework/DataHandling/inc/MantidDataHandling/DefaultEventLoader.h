@@ -11,7 +11,6 @@
 #include "MantidDataHandling/EventWorkspaceCollection.h"
 
 #include <algorithm>
-#include <chrono>
 #include <limits>
 #include <mutex>
 #include <optional>
@@ -20,9 +19,6 @@
 class BankPulseTimes;
 
 namespace Mantid {
-namespace Kernel {
-class ThreadScheduler;
-}
 namespace DataHandling {
 class BankPulseTimes;
 class LoadEventNexus;
@@ -143,15 +139,6 @@ public:
   /// The workspace index for a detector ID (spectrum number if event_id_is_spec), or nothing if the ID is outside the
   /// map. The index is past the last spectrum when the ID has none.
   std::optional<size_t> workspaceIndexOf(const detid_t id) const;
-
-  /// Diagnostics: time origin of the load
-  std::chrono::steady_clock::time_point m_diagStart;
-  /// Diagnostics: scheduler the tasks run on, used to report the queue length
-  Kernel::ThreadScheduler *m_diagScheduler{nullptr};
-  /// Diagnostics: seconds since the start of the load
-  double diagElapsed() const;
-  /// Diagnostics: write a "[LEN-DIAG]" notice line with the elapsed time, thread and queue length
-  void diagLog(const std::string &msg) const;
 
 private:
   DefaultEventLoader(LoadEventNexus *alg, EventWorkspaceCollection &ws, bool haveWeights, bool event_id_is_spec,
