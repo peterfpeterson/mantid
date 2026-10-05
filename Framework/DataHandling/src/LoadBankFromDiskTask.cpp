@@ -20,6 +20,7 @@
 #include "MantidNexus/NexusIOHelper.h"
 
 #include "tbb/blocked_range.h"
+#include "tbb/global_control.h"
 #include "tbb/parallel_for.h"
 #include "tbb/parallel_reduce.h"
 
@@ -95,12 +96,19 @@ uint32_t balancedMidId(std::vector<size_t> const &counts, const uint32_t minId) 
 
 /// Events in each range that fillInPlace fills in parallel, so banks with fewer events are filled in one range
 constexpr size_t EVENTS_PER_FILL_RANGE{size_t(1) << 24};
-/// Most ranges fillInPlace fills in parallel for one bank. More gave no further gain in tests.
-constexpr size_t MAX_FILL_RANGES{8};
 
-/// How many contiguous ranges of events to fill a bank's numEvents in, in parallel
-size_t numFillRanges(const size_t numEvents) {
-  return std::clamp<size_t>((numEvents + EVENTS_PER_FILL_RANGE - 1) / EVENTS_PER_FILL_RANGE, 1, MAX_FILL_RANGES);
+/** How many contiguous ranges of events to fill a bank in, in parallel: one per EVENTS_PER_FILL_RANGE events, but no
+ * more than the cores TBB may use (which follows MultiThreaded.MaxCores), and no more than numEvents / numDetIds. Each
+ * range keeps a count and a write position for every detector ID, so the last limit keeps those smaller than the
+ * events the range writes.
+ * @param numEvents :: events in the bank
+ * @param numDetIds :: detector IDs the bank's events are filled into
+ */
+size_t numFillRanges(const size_t numEvents, const size_t numDetIds) {
+  const size_t byEvents = (numEvents + EVENTS_PER_FILL_RANGE - 1) / EVENTS_PER_FILL_RANGE;
+  const size_t byCores = tbb::global_control::active_value(tbb::global_control::max_allowed_parallelism);
+  const size_t byMemory = numEvents / std::max<size_t>(numDetIds, 1);
+  return std::max<size_t>(1, std::min({byEvents, byCores, byMemory}));
 }
 
 /** The pulses with events in a bank's arrays, split into contiguous ranges holding about the same number of events.
@@ -684,8 +692,9 @@ void LoadBankFromDiskTask::run() {
   // task. This needs the pre-count, and falls back to the processing tasks when it does not apply.
   const bool canFillInPlace = m_loader.precount && !m_have_weight && !m_loader.alg->compressEvents &&
                               m_loader.m_ws.nPeriods() == 1 && event_index;
-  if (canFillInPlace && fillInPlace(*event_id, *event_time_of_flight, static_cast<size_t>(m_loadStart[0]), event_index,
-                                    numFillRanges(static_cast<size_t>(m_loadSize[0])))) {
+  if (canFillInPlace &&
+      fillInPlace(*event_id, *event_time_of_flight, static_cast<size_t>(m_loadStart[0]), event_index,
+                  numFillRanges(static_cast<size_t>(m_loadSize[0]), static_cast<size_t>(m_max_id - m_min_id) + 1))) {
     // the processing tasks this replaces would have reported 3 steps each
     prog->reportIncrement(m_loader.splitProcessing ? 6 : 3, entry_name + ": filled events");
     thisBankPulseTimes.reset();
