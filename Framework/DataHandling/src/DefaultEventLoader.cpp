@@ -6,10 +6,12 @@
 // SPDX - License - Identifier: GPL - 3.0 +
 #include "MantidDataHandling/DefaultEventLoader.h"
 #include "MantidAPI/Progress.h"
+#include "MantidDataHandling/BankPulseTimes.h"
 #include "MantidDataHandling/LoadBankFromDiskTask.h"
 #include "MantidDataHandling/LoadEventNexus.h"
 #include "MantidKernel/ThreadPool.h"
 #include "MantidKernel/ThreadScheduler.h"
+#include "MantidKernel/TimeROI.h"
 
 #include <algorithm>
 #include <fstream>
@@ -164,6 +166,39 @@ std::pair<size_t, size_t> DefaultEventLoader::setupChunking(std::vector<std::str
     }
   }
   return {bank0, bankn};
+}
+
+/** The pulses to load from a bank, after the time and bad pulse filters
+ * @param pulseTimes :: the bank's pulse times
+ * @return the indices of the pulses to load, as the PulseIndexer takes them; empty to load them all
+ */
+std::vector<size_t> DefaultEventLoader::pulseIndicesToLoad(const BankPulseTimes &pulseTimes) const {
+  std::vector<size_t> pulseROI;
+  if (alg->m_is_time_filtered)
+    pulseROI = pulseTimes.getPulseIndices(alg->filter_time_start, alg->filter_time_stop);
+  if (alg->filter_bad_pulses)
+    pulseROI = Kernel::ROI::calculate_intersection(
+        pulseROI, pulseTimes.getPulseIndices(alg->bad_pulses_timeroi->toTimeIntervals()));
+  return pulseROI;
+}
+
+TofFilter DefaultEventLoader::tofFilter() const {
+  return TofFilter(alg->filter_tof_range, alg->filter_tof_min, alg->filter_tof_max);
+}
+
+void DefaultEventLoader::addTofStats(const TofStats &stats) const {
+  std::lock_guard<std::mutex> lock(alg->m_tofMutex);
+  alg->shortest_tof = std::min(alg->shortest_tof, stats.shortestTof);
+  alg->longest_tof = std::max(alg->longest_tof, stats.longestTof);
+  alg->bad_tofs += stats.badTofs;
+  alg->discarded_events += stats.discardedEvents;
+}
+
+std::optional<size_t> DefaultEventLoader::workspaceIndexOf(const detid_t id) const {
+  const detid_t offsetId = id + pixelID_to_wi_offset;
+  if (offsetId < 0 || static_cast<size_t>(offsetId) >= pixelID_to_wi_vector.size())
+    return std::nullopt;
+  return pixelID_to_wi_vector[static_cast<size_t>(offsetId)];
 }
 
 double DefaultEventLoader::diagElapsed() const {

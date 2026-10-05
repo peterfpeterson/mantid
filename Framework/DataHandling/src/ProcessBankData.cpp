@@ -61,12 +61,11 @@ ProcessBankData::ProcessBankData(DefaultEventLoader &m_loader, const std::string
                                  std::shared_ptr<std::vector<float>> const &tevent_weight, detid_t min_event_id,
                                  detid_t max_event_id, std::shared_ptr<std::vector<size_t> const> eventsPerDetId,
                                  detid_t eventsPerDetIdMin)
-    : Task(), m_loader(m_loader), entry_name(std::move(entry_name)),
-      pixelID_to_wi_vector(m_loader.pixelID_to_wi_vector), pixelID_to_wi_offset(m_loader.pixelID_to_wi_offset),
-      prog(prog), event_detid(event_id), event_time_of_flight(tevent_time_of_flight), numEvents(numEvents),
-      startAt(startAt), event_index(tevent_index), thisBankPulseTimes(thisBankPulseTimes), have_weight(have_weight),
-      event_weight(tevent_weight), m_min_detid(min_event_id), m_max_detid(max_event_id),
-      m_eventsPerDetId(std::move(eventsPerDetId)), m_eventsPerDetIdMin(eventsPerDetIdMin) {
+    : Task(), m_loader(m_loader), entry_name(std::move(entry_name)), prog(prog), event_detid(event_id),
+      event_time_of_flight(tevent_time_of_flight), numEvents(numEvents), startAt(startAt), event_index(tevent_index),
+      thisBankPulseTimes(thisBankPulseTimes), have_weight(have_weight), event_weight(tevent_weight),
+      m_min_detid(min_event_id), m_max_detid(max_event_id), m_eventsPerDetId(std::move(eventsPerDetId)),
+      m_eventsPerDetIdMin(eventsPerDetIdMin) {
   // Cost is approximately proportional to the number of events to process.
   m_cost = static_cast<double>(numEvents);
 
@@ -131,12 +130,8 @@ void ProcessBankData::run() {
   size_t diagEventsAdded = 0;
   size_t diagDetIdsTouched = 0;
 
-  // Local tof limits
-  double my_shortest_tof = static_cast<double>(std::numeric_limits<uint32_t>::max()) * 0.1;
-  double my_longest_tof = 0.;
-  // A count of "bad" TOFs that were too high
-  size_t badTofs = 0;
-  size_t my_discarded_events(0);
+  // Local tof limits and counts
+  TofStats tofStats;
 
   prog->report(entry_name + ": precount");
   // ---- Pre-counting events per pixel ID ----
@@ -165,22 +160,11 @@ void ProcessBankData::run() {
   const bool trackUsedDetIds = (counts == nullptr);
   std::vector<bool> usedDetIds(trackUsedDetIds ? m_max_detid - m_min_detid + 1 : 0, false);
 
-  const double TOF_MIN = alg->filter_tof_min;
-  const double TOF_MAX = alg->filter_tof_max;
-  const bool NO_TOF_FILTERING = !(alg->filter_tof_range);
+  const auto tofFilter = m_loader.tofFilter();
 
   // set up wall-clock filtering if it was requested
-  std::vector<size_t> pulseROI;
-  if (alg->m_is_time_filtered) {
-    pulseROI = thisBankPulseTimes->getPulseIndices(alg->filter_time_start, alg->filter_time_stop);
-  }
-
-  if (alg->filter_bad_pulses) {
-    pulseROI = Mantid::Kernel::ROI::calculate_intersection(
-        pulseROI, thisBankPulseTimes->getPulseIndices(alg->bad_pulses_timeroi->toTimeIntervals()));
-  }
-
-  const PulseIndexer pulseIndexer(event_index, startAt, numEvents, entry_name, pulseROI);
+  const PulseIndexer pulseIndexer(event_index, startAt, numEvents, entry_name,
+                                  m_loader.pulseIndicesToLoad(*thisBankPulseTimes));
   diagSetup = diagLap.lap();
 
   // loop over all pulses
@@ -198,8 +182,7 @@ void ProcessBankData::run() {
       if (detId >= m_min_detid && detId <= m_max_detid) {
         // Create the tofevent
         const auto tof = static_cast<double>((*event_time_of_flight)[eventIndex]);
-        // this is fancy for check if value is in range
-        if ((NO_TOF_FILTERING) || ((tof - TOF_MIN) * (tof - TOF_MAX) <= 0.)) {
+        if (tofFilter.keeps(tof)) {
           // Handle simulated data if present
           if (have_weight) {
             auto *eventVector = m_loader.weightedEventVectors[periodIndex][detId];
@@ -210,7 +193,7 @@ void ProcessBankData::run() {
               eventVector->emplace_back(tof, pulsetime, weight, errorSq);
               ++diagEventsAdded;
             } else {
-              ++my_discarded_events;
+              ++tofStats.discardedEvents;
             }
           } else {
             // We have cached the vector of events for this detector ID
@@ -220,22 +203,12 @@ void ProcessBankData::run() {
               eventVector->emplace_back(std::move(tof), pulsetime);
               ++diagEventsAdded;
             } else {
-              ++my_discarded_events;
+              ++tofStats.discardedEvents;
             }
           }
 
-          // Skip any events that are the cause of bad DAS data (e.g. a negative
-          // number in uint32 -> 2.4 billion * 100 nanosec = 2.4e8 microsec)
-          if (tof < 2e8) {
-            // tof limits from things observed here
-            if (tof > my_longest_tof) {
-              my_longest_tof = tof;
-            }
-            if (tof < my_shortest_tof) {
-              my_shortest_tof = tof;
-            }
-          } else
-            badTofs++;
+          // tof limits from things observed here
+          tofStats.add(tof);
 
           // Track all the touched wi
           if (trackUsedDetIds) {
@@ -285,18 +258,7 @@ void ProcessBankData::run() {
                            << "monotonically increasing pulse times\n";
 
   // Join back up the tof limits to the global ones
-  // This is not thread safe, so only one thread at a time runs this.
-  {
-    std::lock_guard<std::mutex> _lock(alg->m_tofMutex);
-    if (my_shortest_tof < alg->shortest_tof) {
-      alg->shortest_tof = my_shortest_tof;
-    }
-    if (my_longest_tof > alg->longest_tof) {
-      alg->longest_tof = my_longest_tof;
-    }
-    alg->bad_tofs += badTofs;
-    alg->discarded_events += my_discarded_events;
-  }
+  m_loader.addTofStats(tofStats);
   diagTofJoin = diagLap.lap();
 
 #ifndef _WIN32
@@ -343,14 +305,13 @@ const size_t *ProcessBankData::eventsPerDetIdInRange() const {
  * @return The workspace index for this pixel
  */
 size_t ProcessBankData::getWorkspaceIndexFromPixelID(const detid_t pixID) {
-  // Check that the vector index is not out of range
-  const detid_t offset_pixID = pixID + pixelID_to_wi_offset;
-  if (offset_pixID < 0 || offset_pixID >= static_cast<int32_t>(pixelID_to_wi_vector.size())) {
+  const auto wi = m_loader.workspaceIndexOf(pixID);
+  if (!wi) {
     std::stringstream msg;
-    msg << "Error finding workspace index; pixelID " << pixID << " with offset " << pixelID_to_wi_offset
-        << " is out of range (length=" << pixelID_to_wi_vector.size() << ")";
+    msg << "Error finding workspace index; pixelID " << pixID << " with offset " << m_loader.pixelID_to_wi_offset
+        << " is out of range (length=" << m_loader.pixelID_to_wi_vector.size() << ")";
     throw std::runtime_error(msg.str());
   }
-  return pixelID_to_wi_vector[offset_pixID];
+  return *wi;
 }
 } // namespace Mantid::DataHandling
