@@ -42,6 +42,8 @@ private:
   std::unique_ptr<std::vector<uint32_t>> loadEventId(Nexus::File &file);
   std::unique_ptr<std::vector<float>> loadTof(Nexus::File &file);
   std::unique_ptr<std::vector<float>> loadEventWeights(Nexus::File &file);
+  bool fillInPlace(std::vector<uint32_t> const &ids, std::vector<float> const &tofs, const size_t firstEvent,
+                   const std::shared_ptr<std::vector<uint64_t>> &event_index, const size_t numRanges);
   uint64_t recalculateDataSize(const int64_t size);
 
   /// Algorithm being run

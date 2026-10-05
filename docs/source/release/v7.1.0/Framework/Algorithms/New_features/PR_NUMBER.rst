@@ -1,0 +1,1 @@
+- :ref:`algm-LoadEventNexus` is faster when loading banks with many events, by up to about 30% for files with a billion events. When ``Precount`` is enabled (the default), unweighted events are now written straight into event lists sized to fit them, filling large banks in parallel.

@@ -109,17 +109,8 @@ void ProcessBankCompressed::collectEvents() {
   // iterate through all events in a single pulse
   if (m_event_index || m_loader.m_ws.nPeriods() > 1 || alg->m_is_time_filtered || alg->filter_bad_pulses) {
     // set up wall-clock filtering if it was requested
-    std::vector<size_t> pulseROI;
-    if (alg->m_is_time_filtered) {
-      pulseROI = m_bankPulseTimes->getPulseIndices(alg->filter_time_start, alg->filter_time_stop);
-    }
-
-    if (alg->filter_bad_pulses) {
-      pulseROI = Mantid::Kernel::ROI::calculate_intersection(
-          pulseROI, m_bankPulseTimes->getPulseIndices(alg->bad_pulses_timeroi->toTimeIntervals()));
-    }
-
-    const PulseIndexer pulseIndexer(m_event_index, m_firstEventIndex, NUM_EVENTS, m_entry_name, pulseROI);
+    const PulseIndexer pulseIndexer(m_event_index, m_firstEventIndex, NUM_EVENTS, m_entry_name,
+                                    m_loader.pulseIndicesToLoad(*m_bankPulseTimes));
     for (const auto &pulseIter : pulseIndexer) {
       const int logPeriodNumber = m_bankPulseTimes->periodNumber(pulseIter.pulseIndex);
       const auto periodIndex = static_cast<size_t>(logPeriodNumber - 1);
@@ -247,18 +238,13 @@ void ProcessBankCompressed::run() {
 
   // TODO need to coordinate with accumulators to find out if they were sorted
   // set sort order on all of the EventLists since they were sorted by TOF
-  const auto pixelID_to_wi_offset = m_loader.pixelID_to_wi_offset;
   auto &outputWS = m_loader.m_ws;
   const size_t numEventLists = m_loader.m_ws.getNumberHistograms();
-  const detid_t pixelIDtoWSVec_size = static_cast<detid_t>(m_loader.pixelID_to_wi_vector.size());
   for (detid_t detid = m_detid_min; detid <= m_detid_max; ++detid) {
-    const detid_t detid_offset = detid + pixelID_to_wi_offset;
-    if (!(detid_offset < 0 || detid_offset >= pixelIDtoWSVec_size)) {
-      const auto wi = m_loader.pixelID_to_wi_vector[detid_offset];
-      if (wi < numEventLists) {
-        const auto sortOrder = m_sorting[static_cast<size_t>(detid - m_detid_min)];
-        outputWS.getSpectrum(wi).setSortOrder(sortOrder);
-      }
+    const auto wi = m_loader.workspaceIndexOf(detid);
+    if (wi && *wi < numEventLists) {
+      const auto sortOrder = m_sorting[static_cast<size_t>(detid - m_detid_min)];
+      outputWS.getSpectrum(*wi).setSortOrder(sortOrder);
     }
   }
 

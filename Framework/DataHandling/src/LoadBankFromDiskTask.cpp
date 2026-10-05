@@ -10,6 +10,7 @@
 #include "MantidDataHandling/LoadEventNexus.h"
 #include "MantidDataHandling/ProcessBankCompressed.h"
 #include "MantidDataHandling/ProcessBankData.h"
+#include "MantidDataHandling/PulseIndexer.h"
 #include "MantidKernel/ParallelMinMax.h"
 #include "MantidKernel/Timer.h"
 #include "MantidKernel/Unit.h"
@@ -19,6 +20,7 @@
 #include "MantidNexus/NexusIOHelper.h"
 
 #include "tbb/blocked_range.h"
+#include "tbb/parallel_for.h"
 #include "tbb/parallel_reduce.h"
 
 #include <algorithm>
@@ -93,6 +95,153 @@ uint32_t balancedMidId(std::vector<size_t> const &counts, const uint32_t minId) 
   return minId + static_cast<uint32_t>(counts.size() - 1);
 }
 
+/// Events in each range that fillInPlace fills in parallel, so banks with fewer events are filled in one range
+constexpr size_t EVENTS_PER_FILL_RANGE{size_t(1) << 24};
+/// Most ranges fillInPlace fills in parallel for one bank. More gave no further gain in tests.
+constexpr size_t MAX_FILL_RANGES{8};
+
+/// How many contiguous ranges of events to fill a bank's numEvents in, in parallel
+size_t numFillRanges(const size_t numEvents) {
+  return std::clamp<size_t>((numEvents + EVENTS_PER_FILL_RANGE - 1) / EVENTS_PER_FILL_RANGE, 1, MAX_FILL_RANGES);
+}
+
+/** The pulses with events in a bank's arrays, split into contiguous ranges holding about the same number of events.
+ *
+ * A PulseIndexer over part of the arrays does not find the right pulses, so the split is made between the pulses of
+ * one PulseIndexer over all of them.
+ */
+class PulseRanges {
+public:
+  PulseRanges(const Mantid::DataHandling::PulseIndexer &indexer, const size_t numRanges)
+      : m_rangeStart(numRanges + 1, 0) {
+    size_t eventsInPulses = 0;
+    for (const auto &pulse : indexer) {
+      if (pulse.eventIndexStop > pulse.eventIndexStart) {
+        m_pulses.push_back(pulse);
+        eventsInPulses += pulse.eventIndexStop - pulse.eventIndexStart;
+      }
+    }
+    std::fill(m_rangeStart.begin() + 1, m_rangeStart.end(), m_pulses.size());
+    size_t eventsSoFar = 0;
+    size_t range = 1;
+    for (size_t k = 0; k < m_pulses.size() && range < numRanges; ++k) {
+      eventsSoFar += m_pulses[k].eventIndexStop - m_pulses[k].eventIndexStart;
+      while (range < numRanges && eventsSoFar * numRanges >= eventsInPulses * range)
+        m_rangeStart[range++] = k + 1;
+    }
+  }
+
+  size_t size() const { return m_rangeStart.size() - 1; }
+
+  /// Call func(arrayIndex, pulseTime) for each event in one range, in order
+  template <typename Func>
+  void forEachEvent(const size_t range, const Mantid::DataHandling::BankPulseTimes &pulseTimes, Func &&func) const {
+    for (size_t k = m_rangeStart[range]; k < m_rangeStart[range + 1]; ++k) {
+      const auto &pulse = m_pulses[k];
+      const auto &pulseTime = pulseTimes.pulseTime(pulse.pulseIndex);
+      for (size_t i = pulse.eventIndexStart; i < pulse.eventIndexStop; ++i)
+        func(i, pulseTime);
+    }
+  }
+
+private:
+  std::vector<Mantid::DataHandling::PulseIndexer::IteratorValue> m_pulses;
+  /// range r has pulses [m_rangeStart[r], m_rangeStart[r + 1])
+  std::vector<size_t> m_rangeStart;
+};
+
+using EventLists = std::vector<std::vector<Mantid::Types::Event::TofEvent> *>;
+using Mantid::Types::Event::TofEvent;
+
+/** Count each range's events for each list, in parallel
+ * @param isKept :: isKept(id, tof) is whether the filters keep an event with an ID in [minId, minId + width)
+ * @return counts[range][id - minId]
+ */
+template <typename IsKept>
+std::vector<std::vector<size_t>>
+countEventsPerRange(const PulseRanges &ranges, const Mantid::DataHandling::BankPulseTimes &pulseTimes,
+                    std::vector<uint32_t> const &ids, std::vector<float> const &tofs, const IsKept &isKept,
+                    const EventLists &lists, const uint32_t minId, const size_t width) {
+  std::vector<std::vector<size_t>> rangeCounts(ranges.size(), std::vector<size_t>(width, 0));
+  tbb::parallel_for(size_t(0), ranges.size(), [&](const size_t range) {
+    auto &counts = rangeCounts[range];
+    ranges.forEachEvent(range, pulseTimes, [&](const size_t i, const auto &) {
+      const uint32_t id = ids[i];
+      if (isKept(id, static_cast<double>(tofs[i])) && lists[id])
+        ++counts[id - minId];
+    });
+  });
+  return rangeCounts;
+}
+
+/// Whether two detector IDs with events, where index 0 of totals is minId, share one list
+bool listsAreShared(const EventLists &lists, const uint32_t minId, std::vector<size_t> const &totals) {
+  std::vector<const void *> used;
+  for (size_t i = 0; i < totals.size(); ++i) {
+    if (totals[i] > 0)
+      used.emplace_back(lists[minId + i]);
+  }
+  std::sort(used.begin(), used.end());
+  return std::adjacent_find(used.cbegin(), used.cend()) != used.cend();
+}
+
+/** Grow each list once to fit its new events, in parallel, and give every range its start in each list, after any
+ * events already there and the earlier ranges' events
+ * @return cursors[range][id - minId], null for detector IDs with no events
+ */
+std::vector<std::vector<TofEvent *>> growLists(const EventLists &lists, const uint32_t minId,
+                                               std::vector<size_t> const &totals,
+                                               std::vector<std::vector<size_t>> const &rangeCounts) {
+  std::vector<std::vector<TofEvent *>> rangeCursors(rangeCounts.size(),
+                                                    std::vector<TofEvent *>(totals.size(), nullptr));
+  tbb::parallel_for(size_t(0), totals.size(), [&](const size_t i) {
+    if (totals[i] == 0)
+      return;
+    auto *list = lists[minId + i];
+    const size_t existing = list->size();
+    list->resize(existing + totals[i]);
+    auto *position = list->data() + existing;
+    for (size_t range = 0; range < rangeCounts.size(); ++range) {
+      rangeCursors[range][i] = position;
+      position += rangeCounts[range][i];
+    }
+  });
+  return rangeCursors;
+}
+
+/** Write each range's events from its own start in every list, in parallel
+ * @return the time-of-flight limits and counts of all the ranges
+ */
+template <typename IsKept>
+Mantid::DataHandling::TofStats
+fillRanges(const PulseRanges &ranges, const Mantid::DataHandling::BankPulseTimes &pulseTimes,
+           std::vector<uint32_t> const &ids, std::vector<float> const &tofs, const IsKept &isKept, const uint32_t minId,
+           std::vector<std::vector<TofEvent *>> &rangeCursors) {
+  std::vector<Mantid::DataHandling::TofStats> stats(ranges.size());
+  tbb::parallel_for(size_t(0), ranges.size(), [&](const size_t range) {
+    auto &cursors = rangeCursors[range];
+    auto &stat = stats[range];
+    ranges.forEachEvent(range, pulseTimes, [&](const size_t i, const auto &pulseTime) {
+      const uint32_t id = ids[i];
+      const auto tof = static_cast<double>(tofs[i]);
+      if (!isKept(id, tof))
+        return;
+      auto *&cursor = cursors[id - minId];
+      if (cursor) {
+        *cursor = TofEvent(tof, pulseTime);
+        ++cursor;
+      } else {
+        ++stat.discardedEvents;
+      }
+      stat.add(tof);
+    });
+  });
+  Mantid::DataHandling::TofStats total;
+  for (const auto &stat : stats)
+    total.merge(stat);
+  return total;
+}
+
 /// Number of events on detector IDs [minId, lastId], where index 0 of counts is minId
 size_t eventsUpTo(std::vector<size_t> const &counts, const uint32_t minId, const uint32_t lastId) {
   return std::accumulate(counts.cbegin(), counts.cbegin() + (lastId - minId) + 1, static_cast<size_t>(0));
@@ -157,18 +306,33 @@ void LoadBankFromDiskTask::loadPulseTimes(Nexus::File &file) {
     thispulseTimes = static_cast<size_t>(file.getInfo().dims[0]);
   file.closeData();
 
-  // Now, we look through existing ones to see if it is already loaded
-  // thisBankPulseTimes = NULL;
-  for (auto &bankPulseTime : m_loader.m_bankPulseTimes) {
-    if (bankPulseTime->equals(thispulseTimes, thisStartTime)) {
-      thisBankPulseTimes = bankPulseTime;
+  // Now, we look through existing ones to see if it is already loaded. Other bank tasks search and add to the list
+  // at the same time, so it is only touched under its mutex.
+  const auto findLoaded = [this, thispulseTimes, &thisStartTime]() {
+    const auto &loaded = m_loader.m_bankPulseTimes;
+    const auto found = std::find_if(loaded.cbegin(), loaded.cend(), [&](const auto &bankPulseTime) {
+      return bankPulseTime->equals(thispulseTimes, thisStartTime);
+    });
+    return found == loaded.cend() ? nullptr : *found;
+  };
+  {
+    std::lock_guard<std::mutex> lock(m_loader.m_bankPulseTimesMutex);
+    if (auto loaded = findLoaded()) {
+      thisBankPulseTimes = std::move(loaded);
       return;
     }
   }
 
-  // Not found? Need to load and add it
-  thisBankPulseTimes = std::make_shared<BankPulseTimes>(file, m_framePeriodNumbers);
-  m_loader.m_bankPulseTimes.emplace_back(thisBankPulseTimes);
+  // Not found? Need to load and add it. Load outside the lock so other banks can read at the same time, then use
+  // whichever copy is in the list, in case another bank added the same pulse times meanwhile.
+  auto pulseTimes = std::make_shared<BankPulseTimes>(file, m_framePeriodNumbers);
+  std::lock_guard<std::mutex> lock(m_loader.m_bankPulseTimesMutex);
+  if (auto loaded = findLoaded()) {
+    thisBankPulseTimes = std::move(loaded);
+  } else {
+    m_loader.m_bankPulseTimes.emplace_back(pulseTimes);
+    thisBankPulseTimes = std::move(pulseTimes);
+  }
 }
 
 /** Load the event_index field
@@ -547,6 +711,21 @@ void LoadBankFromDiskTask::run() {
   // schedule the job to generate the event lists
   const bool useCompressed =
       (m_loader.alg->compressEvents) && (!event_weight) && (m_loader.alg->compressTolerance != 0);
+
+  // Unweighted events from one period that are not compressed are written straight into lists sized to fit, in this
+  // task. This needs the pre-count, and falls back to the processing tasks when it does not apply.
+  const bool canFillInPlace = m_loader.precount && !m_have_weight && !m_loader.alg->compressEvents &&
+                              m_loader.m_ws.nPeriods() == 1 && event_index;
+  if (canFillInPlace && fillInPlace(*event_id, *event_time_of_flight, static_cast<size_t>(m_loadStart[0]), event_index,
+                                    numFillRanges(static_cast<size_t>(m_loadSize[0])))) {
+    // the processing tasks this replaces would have reported 3 steps each
+    prog->reportIncrement(m_loader.splitProcessing ? 6 : 3, entry_name + ": filled events");
+    m_loader.diagLog("disk-end bank=" + entry_name);
+    thisBankPulseTimes.reset();
+    return;
+  }
+  if (m_loader.alg->getCancel())
+    return;
   // only split if told to and the section to load is at least 1/4 the size
   // of the whole bank
   const bool splitBank = m_loader.splitProcessing && m_max_id > (m_min_id + (bank_size / 4));
@@ -614,19 +793,11 @@ void LoadBankFromDiskTask::run() {
     }
 
     // Join back up the tof limits to the global ones
-    // This is not thread safe, so only one thread at a time runs this.
-    {
-      std::lock_guard<std::mutex> _lock(m_loader.alg->m_tofMutex);
-      if (tof_min_fixed < m_loader.alg->shortest_tof) {
-        m_loader.alg->shortest_tof = tof_min_fixed;
-      }
-      if (tof_max_fixed > m_loader.alg->longest_tof) {
-        m_loader.alg->longest_tof = tof_max_fixed;
-      }
-      // TODO
-      // m_loader.alg->bad_tofs += badTofs;
-      // m_loader.alg->discarded_events += my_discarded_events;
-    }
+    // TODO count the bad times-of-flight and discarded events too
+    TofStats tofStats;
+    tofStats.shortestTof = tof_min_fixed;
+    tofStats.longestTof = tof_max_fixed;
+    m_loader.addTofStats(tofStats);
 
     // delta >= 0 is linear, < 0 is log
     double delta = m_loader.alg->compressTolerance;
@@ -673,6 +844,65 @@ void LoadBankFromDiskTask::run() {
 #endif
   m_loader.diagLog("disk-end bank=" + entry_name);
   thisBankPulseTimes.reset();
+}
+
+/** Write the bank's events in [m_min_id, m_max_id] straight into their event lists, in numRanges contiguous ranges of
+ * events filled in parallel.
+ *
+ * A counting pass first finds how many of each range's events go to each list, applying the same pulse and
+ * time-of-flight filters as the fill. Each list is then grown once to fit, and each range writes from its own start in
+ * every list, right after the earlier ranges' events. The lists therefore get their events in the same order as
+ * appending them one at a time would give, with no gaps.
+ *
+ * This does nothing, and returns false, when two detector IDs with events share one list, as each detector ID gets its
+ * own write position, or when the algorithm is cancelled.
+ *
+ * @param ids :: the detector IDs, where element 0 is event firstEvent of the bank
+ * @param tofs :: the times-of-flight in microseconds, matching ids
+ * @param firstEvent :: the bank's index of element 0 of the arrays
+ * @param event_index :: the bank's event_index
+ * @param numRanges :: how many ranges of events to fill in parallel
+ * @return true if the events were written
+ */
+bool LoadBankFromDiskTask::fillInPlace(std::vector<uint32_t> const &ids, std::vector<float> const &tofs,
+                                       const size_t firstEvent,
+                                       const std::shared_ptr<std::vector<uint64_t>> &event_index,
+                                       const size_t numRanges) {
+  const auto &lists = m_loader.eventVectors[0];
+  const uint32_t minId = m_min_id;
+  const uint32_t maxId = m_max_id;
+  const auto width = static_cast<size_t>(maxId - minId) + 1;
+  const auto tofFilter = m_loader.tofFilter();
+  const auto isKept = [&](const uint32_t id, const double tof) {
+    return id >= minId && id <= maxId && tofFilter.keeps(tof);
+  };
+  const auto &pulseTimes = *thisBankPulseTimes;
+
+  const PulseIndexer indexer(event_index, firstEvent, ids.size(), entry_name, m_loader.pulseIndicesToLoad(pulseTimes));
+  const PulseRanges ranges(indexer, numRanges);
+  const auto rangeCounts = countEventsPerRange(ranges, pulseTimes, ids, tofs, isKept, lists, minId, width);
+  std::vector<size_t> totals(width, 0);
+  for (const auto &counts : rangeCounts)
+    std::transform(totals.cbegin(), totals.cend(), counts.cbegin(), totals.begin(), std::plus<size_t>());
+  // each detector ID gets its own write positions, which would collide in a shared list
+  if (listsAreShared(lists, minId, totals) || m_loader.alg->getCancel())
+    return false;
+
+  auto rangeCursors = growLists(lists, minId, totals, rangeCounts);
+  m_loader.addTofStats(fillRanges(ranges, pulseTimes, ids, tofs, isKept, minId, rangeCursors));
+
+  // set the sort order of the lists written, as ProcessBankData does
+  const auto sortOrder = pulseTimes.arePulseTimesIncreasing() ? DataObjects::PULSETIME_SORT : DataObjects::UNSORTED;
+  auto &outputWS = m_loader.m_ws;
+  const size_t numEventLists = outputWS.getNumberHistograms();
+  for (size_t i = 0; i < width; ++i) {
+    if (totals[i] == 0)
+      continue;
+    const auto wi = m_loader.workspaceIndexOf(static_cast<detid_t>(minId + i));
+    if (wi && *wi < numEventLists)
+      outputWS.getSpectrum(*wi).setSortOrder(sortOrder);
+  }
+  return true;
 }
 
 /**

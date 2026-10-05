@@ -597,6 +597,45 @@ public:
     }
   }
 
+  void test_precount_gives_the_same_events_in_the_same_order() {
+    // With Precount, unweighted events are written straight into lists sized to fit. They must match the events that
+    // appending one at a time gives, in the same order, including with the time-of-flight and time filters.
+    const auto load = [](const std::string &wsName, const bool precount) {
+      LoadEventNexus ld;
+      ld.initialize();
+      ld.setRethrows(true);
+      ld.setPropertyValue("Filename", "CNCS_7860_event.nxs");
+      ld.setPropertyValue("OutputWorkspace", wsName);
+      ld.setProperty("Precount", precount);
+      ld.setProperty("FilterByTofMin", 45000.);
+      ld.setProperty("FilterByTofMax", 55000.);
+      ld.setProperty("FilterByTimeStart", 10.);
+      ld.setProperty("FilterByTimeStop", 200.);
+      ld.setProperty<bool>("LoadLogs", false);
+      ld.execute();
+      TS_ASSERT(ld.isExecuted());
+      return AnalysisDataService::Instance().retrieveWS<EventWorkspace>(wsName);
+    };
+    const auto appended = load("cncs_appended", false);
+    const auto filled = load("cncs_filled", true);
+
+    TS_ASSERT_EQUALS(filled->getNumberHistograms(), appended->getNumberHistograms());
+    TS_ASSERT_EQUALS(filled->getNumberEvents(), appended->getNumberEvents());
+    TS_ASSERT_LESS_THAN(0, filled->getNumberEvents());
+    TS_ASSERT_LESS_THAN(filled->getNumberEvents(), 112266); // the filters removed some events
+    size_t spectraDiffering = 0;
+    for (size_t i = 0; i < filled->getNumberHistograms(); ++i) {
+      const auto &filledList = filled->getSpectrum(i);
+      const auto &appendedList = appended->getSpectrum(i);
+      if (filledList.getEvents() != appendedList.getEvents() || filledList.getSortType() != appendedList.getSortType())
+        ++spectraDiffering;
+    }
+    TS_ASSERT_EQUALS(spectraDiffering, 0);
+
+    AnalysisDataService::Instance().remove("cncs_appended");
+    AnalysisDataService::Instance().remove("cncs_filled");
+  }
+
   void test_TOF_filtered_loading() {
     std::cout << "test TOF filtering\n" << std::flush;
     const std::string wsName = "test_filtering";

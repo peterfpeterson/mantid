@@ -10,7 +10,11 @@
 #include "MantidDataHandling/DllConfig.h"
 #include "MantidDataHandling/EventWorkspaceCollection.h"
 
+#include <algorithm>
 #include <chrono>
+#include <limits>
+#include <mutex>
+#include <optional>
 #include <string>
 
 class BankPulseTimes;
@@ -20,7 +24,53 @@ namespace Kernel {
 class ThreadScheduler;
 }
 namespace DataHandling {
+class BankPulseTimes;
 class LoadEventNexus;
+
+/// The time-of-flight range the user asked to load
+class TofFilter {
+public:
+  TofFilter(const bool filtering, const double tofMin, const double tofMax)
+      : m_filtering(filtering), m_tofMin(tofMin), m_tofMax(tofMax) {}
+  /// Whether an event with this time-of-flight is loaded
+  bool keeps(const double tof) const { return !m_filtering || (tof - m_tofMin) * (tof - m_tofMax) <= 0.; }
+
+private:
+  bool m_filtering;
+  double m_tofMin;
+  double m_tofMax;
+};
+
+/// Time-of-flight limits and counts of the events loaded, gathered by each task and then added to the algorithm's
+struct TofStats {
+  double shortestTof{static_cast<double>(std::numeric_limits<uint32_t>::max()) * 0.1};
+  double longestTof{0.};
+  /// Events with a time-of-flight too large to be real
+  size_t badTofs{0};
+  /// Events on detector IDs that have no event list
+  size_t discardedEvents{0};
+
+  /// Record the time-of-flight of an event that passed the filters
+  void add(const double tof) {
+    // Skip any events that are the cause of bad DAS data (e.g. a negative number in uint32 -> 2.4 billion * 100
+    // nanosec = 2.4e8 microsec)
+    if (tof < 2e8) {
+      if (tof > longestTof)
+        longestTof = tof;
+      if (tof < shortestTof)
+        shortestTof = tof;
+    } else {
+      ++badTofs;
+    }
+  }
+
+  void merge(const TofStats &other) {
+    shortestTof = std::min(shortestTof, other.shortestTof);
+    longestTof = std::max(longestTof, other.longestTof);
+    badTofs += other.badTofs;
+    discardedEvents += other.discardedEvents;
+  }
+};
 
 /** Helper class for LoadEventNexus that is specific to the current default
   loading code for NXevent_data entries in Nexus files, in particular
@@ -81,6 +131,18 @@ public:
 
   /// One entry of pulse times for each preprocessor
   std::vector<std::shared_ptr<BankPulseTimes>> m_bankPulseTimes;
+  /// Guards m_bankPulseTimes, which the bank tasks search and add to concurrently
+  std::mutex m_bankPulseTimesMutex;
+
+  /// The pulses to load from a bank, after the time and bad pulse filters; empty to load them all
+  std::vector<size_t> pulseIndicesToLoad(const BankPulseTimes &pulseTimes) const;
+  /// The time-of-flight range to load
+  TofFilter tofFilter() const;
+  /// Add a task's time-of-flight limits and counts to the algorithm's. Safe to call from several tasks at once.
+  void addTofStats(const TofStats &stats) const;
+  /// The workspace index for a detector ID (spectrum number if event_id_is_spec), or nothing if the ID is outside the
+  /// map. The index is past the last spectrum when the ID has none.
+  std::optional<size_t> workspaceIndexOf(const detid_t id) const;
 
   /// Diagnostics: time origin of the load
   std::chrono::steady_clock::time_point m_diagStart;
