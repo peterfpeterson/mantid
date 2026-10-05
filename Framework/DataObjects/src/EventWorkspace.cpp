@@ -95,12 +95,9 @@ void EventWorkspace::init(const std::size_t &NVectors, const std::size_t &XLengt
   // Initialize the data
   data.resize(NVectors);
   // Make sure SOMETHING exists for all initialized spots.
-  EventList el;
-  el.setHistogram(edges);
   for (size_t i = 0; i < NVectors; i++) {
-    data[i] = std::make_unique<EventList>(el);
-    data[i]->setMRU(mru.get());
-    data[i]->setSpectrumNo(specnum_t(i));
+    data[i] = std::make_unique<EventList>(mru.get(), specnum_t(i));
+    data[i]->setHistogram(edges);
   }
 
   // Create axes.
@@ -117,12 +114,9 @@ void EventWorkspace::init(const HistogramData::Histogram &histogram) {
     throw std::runtime_error("EventWorkspace cannot be initialized non-NULL Y or E data");
 
   data.resize(numberOfDetectorGroups());
-  EventList el;
-  el.setHistogram(histogram);
   for (size_t i = 0; i < data.size(); i++) {
-    data[i] = std::make_unique<EventList>(el);
-    data[i]->setMRU(mru.get());
-    data[i]->setSpectrumNo(specnum_t(i));
+    data[i] = std::make_unique<EventList>(mru.get(), specnum_t(i));
+    data[i]->setHistogram(histogram);
   }
 
   m_axes.resize(2);
